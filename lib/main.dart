@@ -206,6 +206,52 @@ class _ContactsPageState extends State<ContactsPage> {
     name.dispose(); phone.dispose(); address.dispose(); balance.dispose();
   }
 
+  Future<void> showContactStatement(Map<String, Object?> contact) async {
+    try {
+      final rows = await AppDatabase.instance.contactStatement(contact['id'] as int);
+      if (!mounted) return;
+      final isCustomer = contact['kind'] == 'customer';
+      showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Text('كشف حساب • ${contact['name']}'),
+          content: SizedBox(
+            width: double.maxFinite,
+            height: 380,
+            child: rows.isEmpty
+              ? const Center(child: Text('لا توجد حركات على هذا الطرف.'))
+              : ListView.separated(
+                  itemCount: rows.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (ctx, index) {
+                    final row = rows[index];
+                    final debit = (row['debit'] as num).toInt();
+                    final credit = (row['credit'] as num).toInt();
+                    final balance = (row['balance'] as num).toInt();
+                    return ListTile(
+                      dense: true,
+                      title: Text(row['description'] as String),
+                      subtitle: Text('${row['date']} • ${(row['reference'] as String).isEmpty ? 'بدون مرجع' : row['reference']}\nمدين ${(debit / 100).toStringAsFixed(2)} • دائن ${(credit / 100).toStringAsFixed(2)}'),
+                      trailing: SizedBox(
+                        width: 92,
+                        child: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.end, children: [
+                          const Text('الرصيد', style: TextStyle(fontSize: 10, color: Colors.black54)),
+                          Text('${(balance.abs() / 100).toStringAsFixed(2)}', style: const TextStyle(fontWeight: FontWeight.bold)),
+                          Text(balance == 0 ? 'صفر' : ((balance > 0) == isCustomer ? 'مدين' : 'دائن'), style: const TextStyle(fontSize: 10)),
+                        ]),
+                      ),
+                    );
+                  },
+                ),
+          ),
+          actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إغلاق'))],
+        ),
+      );
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر عرض كشف الحساب: $e')));
+    }
+  }
+
   @override
   Widget build(BuildContext context) => Column(children: [
     Padding(
@@ -238,16 +284,28 @@ class _ContactsPageState extends State<ContactsPage> {
                 title: Text(row['name'] as String, style: const TextStyle(fontWeight: FontWeight.bold)),
                 subtitle: Text((phone.isEmpty ? '' : phone + ' • ') + 'الرصيد الحالي: ' + (currentBalance / 100).toStringAsFixed(2) + ' ر.ي'),
                 onTap: () => openEditor(row),
-                trailing: IconButton(
-                  tooltip: 'حذف', icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
-                  onPressed: () async {
-                    if (await confirmDelete(context) && mounted) {
-                      await AppDatabase.instance.deleteContact(row['id'] as int);
-                      setState(() {});
-                      widget.onChanged();
-                    }
-                  },
-                ),
+                trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                  IconButton(
+                    tooltip: 'كشف الحساب',
+                    icon: const Icon(Icons.receipt_long_outlined, color: blue),
+                    onPressed: () => showContactStatement(row),
+                  ),
+                  IconButton(
+                    tooltip: 'حذف', icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+                    onPressed: () async {
+                      if (await confirmDelete(context) && mounted) {
+                        try {
+                          await AppDatabase.instance.deleteContact(row['id'] as int);
+                          if (!mounted) return;
+                          setState(() {});
+                          widget.onChanged();
+                        } catch (e) {
+                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر حذف الطرف المرتبط بحركات: $e')));
+                        }
+                      }
+                    },
+                  ),
+                ]),
               ),
             );
           },
