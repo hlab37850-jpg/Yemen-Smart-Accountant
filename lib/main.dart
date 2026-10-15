@@ -695,6 +695,7 @@ class _AccountingPageState extends State<AccountingPage> {
     }
     int invoiceId = invoices.first['id'] as int;
     List<Map<String, Object?>> lines = await AppDatabase.instance.invoiceLines(invoiceId);
+    if (!mounted) return;
     if (lines.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('الفاتورة المحددة لا تحتوي أصنافاً')));
       return;
@@ -853,7 +854,7 @@ class _AccountingPageState extends State<AccountingPage> {
             FilledButton.icon(
               onPressed: () async {
                 await Clipboard.setData(ClipboardData(text: source));
-                if (ctx.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم نسخ النسخة الاحتياطية إلى الحافظة')));
+                if (ctx.mounted) ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('تم نسخ النسخة الاحتياطية إلى الحافظة')));
               },
               icon: const Icon(Icons.copy),
               label: const Text('نسخ الكل'),
