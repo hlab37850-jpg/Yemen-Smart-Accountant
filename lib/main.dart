@@ -421,11 +421,12 @@ class _CompanyPageState extends State<CompanyPage> {
         SizedBox(width: double.infinity, child: FilledButton.icon(
           onPressed: saving ? null : () async {
             if (!formKey.currentState!.validate()) return;
+            final messenger = ScaffoldMessenger.of(context);
             setState(() => saving = true);
             try {
               await AppDatabase.instance.saveCompany(name: name.text, phone: phone.text, address: address.text, currency: currency.text.trim().isEmpty ? 'ر.ي' : currency.text.trim());
               if (!mounted) return;
-              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم حفظ بيانات المنشأة')));
+              messenger.showSnackBar(const SnackBar(content: Text('تم حفظ بيانات المنشأة')));
               widget.onSaved();
             } finally {
               if (mounted) setState(() => saving = false);
