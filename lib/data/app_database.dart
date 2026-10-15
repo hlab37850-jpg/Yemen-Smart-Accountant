@@ -85,8 +85,25 @@ class AppDatabase {
     return {'customers': customers, 'suppliers': suppliers, 'products': await count('products'), 'entries': await count('journal_entries')};
   }
 
-  Future<List<Map<String, Object?>>> contacts(String kind) async =>
-      (await database).query('contacts', where: 'kind=?', whereArgs: [kind], orderBy: 'name COLLATE NOCASE');
+  Future<List<Map<String, Object?>>> contacts(String kind) async {
+    final db = await database;
+    return db.rawQuery('''
+      SELECT c.*,
+        COALESCE((
+          SELECT SUM(i.total) FROM invoices i
+          WHERE i.contact_id=c.id
+            AND i.invoice_type=CASE WHEN c.kind='customer' THEN 'sale' ELSE 'purchase' END
+        ),0) AS transaction_total,
+        COALESCE((
+          SELECT SUM(v.amount) FROM vouchers v
+          WHERE v.contact_id=c.id
+            AND v.voucher_type=CASE WHEN c.kind='customer' THEN 'receipt' ELSE 'payment' END
+        ),0) AS settled_total
+      FROM contacts c
+      WHERE c.kind=?
+      ORDER BY c.name COLLATE NOCASE
+    ''', [kind]);
+  }
 
   Future<void> saveContact({int? id, required String name, required String phone, required String address, required String kind, required int openingBalance}) async {
     final db = await database;
