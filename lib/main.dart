@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'data/app_database.dart';
 
 void main() {
@@ -628,6 +629,224 @@ class _AccountingPageState extends State<AccountingPage> {
     note.dispose();
   }
 
+  Future<void> addReturn() async {
+    final invoices = await AppDatabase.instance.invoices();
+    if (!mounted) return;
+    if (invoices.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('لا توجد فواتير يمكن إرجاع أصنافها')));
+      return;
+    }
+    int invoiceId = invoices.first['id'] as int;
+    List<Map<String, Object?>> lines = await AppDatabase.instance.invoiceLines(invoiceId);
+    if (lines.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('الفاتورة المحددة لا تحتوي أصنافاً')));
+      return;
+    }
+    int lineId = lines.first['id'] as int;
+    final quantity = TextEditingController(text: '1');
+    final note = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, updateDialog) => AlertDialog(
+        title: const Text('مرتجع مبيعات / مشتريات'),
+        content: Form(key: formKey, child: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
+          DropdownButtonFormField<int>(
+            key: ValueKey('return-invoice-$invoiceId'),
+            initialValue: invoiceId,
+            isExpanded: true,
+            decoration: const InputDecoration(labelText: 'الفاتورة الأصلية'),
+            items: invoices.map((i) => DropdownMenuItem<int>(
+              value: i['id'] as int,
+              child: Text('${i['invoice_type'] == 'sale' ? 'مبيعات' : 'مشتريات'} • ${i['invoice_number']} • ${i['contact_name']}'),
+            )).toList(),
+            onChanged: (value) async {
+              if (value == null) return;
+              final nextLines = await AppDatabase.instance.invoiceLines(value);
+              if (!ctx.mounted || nextLines.isEmpty) return;
+              updateDialog(() {
+                invoiceId = value;
+                lines = nextLines;
+                lineId = lines.first['id'] as int;
+              });
+            },
+          ),
+          const SizedBox(height: 8),
+          DropdownButtonFormField<int>(
+            key: ValueKey('return-line-$invoiceId-${lines.length}'),
+            initialValue: lineId,
+            isExpanded: true,
+            decoration: const InputDecoration(labelText: 'الصنف'),
+            items: lines.map((line) => DropdownMenuItem<int>(
+              value: line['id'] as int,
+              child: Text('${line['product_name']} • الكمية ${line['quantity']}'),
+            )).toList(),
+            onChanged: (value) => updateDialog(() => lineId = value ?? lineId),
+          ),
+          const SizedBox(height: 8),
+          TextFormField(
+            controller: quantity,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            decoration: const InputDecoration(labelText: 'الكمية المرتجعة *'),
+            validator: (v) {
+              final q = double.tryParse((v ?? '').trim());
+              return q == null || q <= 0 ? 'أدخل كمية أكبر من صفر' : null;
+            },
+          ),
+          const SizedBox(height: 8),
+          TextField(controller: note, decoration: const InputDecoration(labelText: 'ملاحظة (اختياري)')),
+          const SizedBox(height: 8),
+          const Text('سيتم رفض الكمية التي تتجاوز المتبقي من الصنف في الفاتورة الأصلية.', style: TextStyle(color: Colors.black54, fontSize: 12)),
+        ]))),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('إلغاء')),
+          FilledButton(onPressed: () {
+            if (formKey.currentState!.validate()) Navigator.pop(ctx, true);
+          }, child: const Text('حفظ المرتجع')),
+        ],
+      )),
+    );
+    if (saved == true && mounted) {
+      try {
+        await AppDatabase.instance.createReturn(
+          invoiceId: invoiceId,
+          invoiceLineId: lineId,
+          quantity: double.parse(quantity.text.trim()),
+          returnDate: DateTime.now().toIso8601String().substring(0, 10),
+          note: note.text,
+        );
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم حفظ المرتجع وتحديث المخزون والقيود')));
+        reload();
+      } catch (e) {
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر حفظ المرتجع: $e')));
+      }
+    }
+    quantity.dispose();
+    note.dispose();
+  }
+
+  Future<void> showStockMovements() async {
+    final rows = await AppDatabase.instance.stockMovements();
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('حركة المخزون'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: rows.isEmpty
+            ? const Text('لا توجد حركات مخزون مسجلة.')
+            : ListView.builder(
+                shrinkWrap: true,
+                itemCount: rows.length,
+                itemBuilder: (ctx, index) {
+                  final row = rows[index];
+                  final type = row['movement_type'] as String;
+                  final quantity = (row['quantity'] as num).toDouble();
+                  final label = switch (type) {
+                    'sale' => 'بيع',
+                    'purchase' => 'شراء',
+                    'sale_return' => 'مرتجع مبيعات',
+                    'purchase_return' => 'مرتجع مشتريات',
+                    _ => type,
+                  };
+                  return ListTile(
+                    dense: true,
+                    title: Text(row['product_name'] as String),
+                    subtitle: Text('${row['movement_date']} • $label • ${row['note']}'),
+                    trailing: Text('${quantity > 0 ? '+' : ''}$quantity ${row['unit_name']}',
+                      style: TextStyle(color: quantity >= 0 ? Colors.green : Colors.red, fontWeight: FontWeight.bold)),
+                  );
+                },
+              ),
+        ),
+        actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إغلاق'))],
+      ),
+    );
+  }
+
+  Future<void> manageBackup() async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(child: Column(mainAxisSize: MainAxisSize.min, children: [
+        ListTile(leading: const Icon(Icons.backup_outlined), title: const Text('إنشاء نسخة احتياطية'), subtitle: const Text('نسخ كل البيانات إلى ملف JSON نصي'), onTap: () => Navigator.pop(ctx, 'export')),
+        ListTile(leading: const Icon(Icons.restore_outlined), title: const Text('استعادة نسخة احتياطية'), subtitle: const Text('استبدال البيانات الحالية ببيانات نسخة محفوظة'), onTap: () => Navigator.pop(ctx, 'import')),
+      ])),
+    );
+    if (action == null || !mounted) return;
+    if (action == 'export') {
+      final source = await AppDatabase.instance.exportBackupJson();
+      if (!mounted) return;
+      showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('النسخة الاحتياطية'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              const Text('انسخ النص واحفظه في ملف آمن. لا تشارك النسخة مع أشخاص غير موثوقين.'),
+              const SizedBox(height: 8),
+              SizedBox(height: 280, child: SingleChildScrollView(child: SelectableText(source))),
+            ]),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إغلاق')),
+            FilledButton.icon(
+              onPressed: () async {
+                await Clipboard.setData(ClipboardData(text: source));
+                if (ctx.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم نسخ النسخة الاحتياطية إلى الحافظة')));
+              },
+              icon: const Icon(Icons.copy),
+              label: const Text('نسخ الكل'),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+    final controller = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('استعادة نسخة احتياطية'),
+        content: Form(key: formKey, child: SizedBox(
+          width: double.maxFinite,
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Text('تحذير: الاستعادة تستبدل جميع البيانات الحالية. انسخ بياناتك الحالية أولاً.'),
+            const SizedBox(height: 10),
+            TextFormField(
+              controller: controller,
+              minLines: 5,
+              maxLines: 9,
+              decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'الصق محتوى ملف النسخة الاحتياطية'),
+              validator: (v) => v == null || v.trim().isEmpty ? 'ألصق محتوى النسخة الاحتياطية' : null,
+            ),
+          ]),
+        )),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('إلغاء')),
+          FilledButton(onPressed: () {
+            if (formKey.currentState!.validate()) Navigator.pop(ctx, true);
+          }, child: const Text('استعادة واستبدال البيانات')),
+        ],
+      ),
+    );
+    if (confirmed == true && mounted) {
+      try {
+        await AppDatabase.instance.importBackupJson(controller.text);
+        if (!mounted) return;
+        reload();
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تمت استعادة النسخة الاحتياطية')));
+      } catch (e) {
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('فشلت الاستعادة: $e')));
+      }
+    }
+    controller.dispose();
+  }
+
   Future<void> addJournalEntry() async {
     final accounts = await AppDatabase.instance.accounts();
     if (!mounted) return;
@@ -792,6 +1011,9 @@ class _AccountingPageState extends State<AccountingPage> {
           OutlinedButton.icon(onPressed: addVoucher, icon: const Icon(Icons.payments_outlined), label: const Text('سند قبض/صرف')),
           OutlinedButton.icon(onPressed: addAccount, icon: const Icon(Icons.account_tree_outlined), label: const Text('إضافة حساب')),
           OutlinedButton.icon(onPressed: showAccountLedger, icon: const Icon(Icons.menu_book_outlined), label: const Text('كشف حساب')),
+          OutlinedButton.icon(onPressed: addReturn, icon: const Icon(Icons.assignment_return_outlined), label: const Text('مرتجع')),
+          OutlinedButton.icon(onPressed: showStockMovements, icon: const Icon(Icons.swap_vert_circle_outlined), label: const Text('حركة المخزون')),
+          OutlinedButton.icon(onPressed: manageBackup, icon: const Icon(Icons.backup_outlined), label: const Text('النسخ الاحتياطي')),
         ]),
         const SizedBox(height: 20),
         const Text('دليل الحسابات', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: navy)),
@@ -904,6 +1126,27 @@ class _AccountingPageState extends State<AccountingPage> {
                 title: Text('${r['invoice_type'] == 'sale' ? 'مبيعات' : 'مشتريات'} • ${r['invoice_number']}'),
                 subtitle: Text('${r['contact_name']} • ${r['invoice_date']}'),
                 trailing: Text('${money(r['total'])} ر.ي', style: const TextStyle(fontWeight: FontWeight.bold)),
+              ),
+            )).toList());
+          },
+        ),
+        const SizedBox(height: 18),
+        const Text('المرتجعات', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: navy)),
+        FutureBuilder<List<Map<String, Object?>>>(
+          key: ValueKey('returns-$revision'),
+          future: AppDatabase.instance.returns(),
+          builder: (context, snapshot) {
+            if (snapshot.hasError) return Text('تعذر تحميل المرتجعات: ${snapshot.error}');
+            if (!snapshot.hasData) return const Padding(padding: EdgeInsets.all(12), child: LinearProgressIndicator());
+            final rows = snapshot.data!;
+            if (rows.isEmpty) return const Card(elevation: 0, child: Padding(padding: EdgeInsets.all(16), child: Text('لا توجد مرتجعات مسجلة بعد.')));
+            return Column(children: rows.map((r) => Card(
+              elevation: 0, color: Colors.white,
+              child: ListTile(
+                leading: const Icon(Icons.assignment_return_outlined, color: blue),
+                title: Text('${r['return_type'] == 'sale_return' ? 'مرتجع مبيعات' : 'مرتجع مشتريات'} • ${r['invoice_number']}'),
+                subtitle: Text('${r['contact_name']} • ${r['return_date']}${(r['note'] as String).isEmpty ? '' : ' • ${r['note']}'}'),
+                trailing: Text('${money(r['amount'])} ر.ي', style: const TextStyle(fontWeight: FontWeight.bold)),
               ),
             )).toList());
           },
