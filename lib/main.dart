@@ -43,7 +43,7 @@ class _MainShellState extends State<MainShell> {
       DashboardPage(key: ValueKey('home-$revision'), onNavigate: (i) => setState(() => selected = i)),
       ContactsPage(key: ValueKey('contacts-$revision'), onChanged: refresh),
       ProductsPage(key: ValueKey('products-$revision'), onChanged: refresh),
-      const ReportsPage(),
+      AccountingPage(key: ValueKey('accounting-$revision')),
       CompanyPage(key: ValueKey('company-$revision'), onSaved: refresh),
     ];
     return Scaffold(
@@ -342,30 +342,244 @@ class _ProductsPageState extends State<ProductsPage> {
   ]);
 }
 
-class ReportsPage extends StatelessWidget {
-  const ReportsPage({super.key});
+class AccountingPage extends StatefulWidget {
+  const AccountingPage({super.key});
   @override
-  Widget build(BuildContext context) => ListView(padding: const EdgeInsets.all(16), children: const [
-    Text('التقارير', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: navy)),
-    SizedBox(height: 12),
-    ReportTile(icon: Icons.people_outline, title: 'تقرير الأطراف', subtitle: 'أعداد العملاء والموردين المسجلين.'),
-    ReportTile(icon: Icons.inventory_outlined, title: 'تقرير الأصناف', subtitle: 'الأصناف وكمياتها وأسعارها.'),
-    ReportTile(icon: Icons.account_balance_outlined, title: 'التقارير المالية', subtitle: 'ستُفعّل بعد استكمال الفواتير والترحيل المحاسبي واختبارات القيود.'),
-    SizedBox(height: 10),
-    Text('هذه النسخة لا تعرض أرباحاً أو أرصدة مالية نهائية قبل استكمال العمليات المحاسبية.', style: TextStyle(color: Colors.black54)),
-  ]);
+  State<AccountingPage> createState() => _AccountingPageState();
 }
 
-class ReportTile extends StatelessWidget {
-  const ReportTile({super.key, required this.icon, required this.title, required this.subtitle});
-  final IconData icon;
-  final String title;
-  final String subtitle;
+class _AccountingPageState extends State<AccountingPage> {
+  int revision = 0;
+  void reload() => setState(() => revision++);
+
+  String money(Object? minor) => ((minor as num? ?? 0) / 100).toStringAsFixed(2);
+
+  Future<void> addAccount() async {
+    final code = TextEditingController();
+    final name = TextEditingController();
+    String type = 'asset';
+    final formKey = GlobalKey<FormState>();
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, updateDialog) => AlertDialog(
+        title: const Text('إضافة حساب'),
+        content: Form(key: formKey, child: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextFormField(controller: code, decoration: const InputDecoration(labelText: 'رمز الحساب *'), validator: (v) => v == null || v.trim().isEmpty ? 'أدخل رمز الحساب' : null),
+          TextFormField(controller: name, decoration: const InputDecoration(labelText: 'اسم الحساب *'), validator: (v) => v == null || v.trim().isEmpty ? 'أدخل اسم الحساب' : null),
+          const SizedBox(height: 8),
+          DropdownButtonFormField<String>(
+            initialValue: type,
+            decoration: const InputDecoration(labelText: 'نوع الحساب'),
+            items: const [
+              DropdownMenuItem(value: 'asset', child: Text('أصول')),
+              DropdownMenuItem(value: 'liability', child: Text('التزامات')),
+              DropdownMenuItem(value: 'equity', child: Text('حقوق ملكية')),
+              DropdownMenuItem(value: 'revenue', child: Text('إيرادات')),
+              DropdownMenuItem(value: 'expense', child: Text('مصروفات')),
+            ],
+            onChanged: (v) => updateDialog(() => type = v ?? 'asset'),
+          ),
+        ]))),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('إلغاء')),
+          FilledButton(onPressed: () { if (formKey.currentState!.validate()) Navigator.pop(ctx, true); }, child: const Text('حفظ')),
+        ],
+      )),
+    );
+    if (saved == true && mounted) {
+      try {
+        await AppDatabase.instance.createAccount(code: code.text, name: name.text, type: type);
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تمت إضافة الحساب')));
+        reload();
+      } catch (e) {
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر إضافة الحساب: $e')));
+      }
+    }
+    code.dispose();
+    name.dispose();
+  }
+
+  Future<void> addJournalEntry() async {
+    final accounts = await AppDatabase.instance.accounts();
+    if (!mounted) return;
+    if (accounts.length < 2) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('أضف حسابين على الأقل أولاً')));
+      return;
+    }
+    final description = TextEditingController();
+    final reference = TextEditingController();
+    final amount = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+    String debitCode = accounts.first['code'] as String;
+    String creditCode = accounts.firstWhere(
+      (a) => a['code'] != debitCode,
+      orElse: () => accounts.last,
+    )['code'] as String;
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, updateDialog) => AlertDialog(
+        title: const Text('قيد يومية جديد'),
+        content: Form(key: formKey, child: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextFormField(controller: description, decoration: const InputDecoration(labelText: 'شرح القيد *'), validator: (v) => v == null || v.trim().isEmpty ? 'شرح القيد مطلوب' : null),
+          TextFormField(controller: reference, decoration: const InputDecoration(labelText: 'رقم المرجع (اختياري)')),
+          const SizedBox(height: 8),
+          DropdownButtonFormField<String>(
+            initialValue: debitCode,
+            decoration: const InputDecoration(labelText: 'الحساب المدين'),
+            items: accounts.map((a) => DropdownMenuItem(value: a['code'] as String, child: Text('${a['code']} - ${a['name']}'))).toList(),
+            onChanged: (v) => updateDialog(() => debitCode = v ?? debitCode),
+          ),
+          const SizedBox(height: 8),
+          DropdownButtonFormField<String>(
+            initialValue: creditCode,
+            decoration: const InputDecoration(labelText: 'الحساب الدائن'),
+            items: accounts.map((a) => DropdownMenuItem(value: a['code'] as String, child: Text('${a['code']} - ${a['name']}'))).toList(),
+            onChanged: (v) => updateDialog(() => creditCode = v ?? creditCode),
+          ),
+          const SizedBox(height: 8),
+          TextFormField(controller: amount, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'المبلغ (ر.ي) *'), validator: (v) {
+            final value = double.tryParse((v ?? '').replaceAll(',', '').trim());
+            return value == null || value <= 0 ? 'أدخل مبلغاً أكبر من صفر' : null;
+          }),
+        ]))),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('إلغاء')),
+          FilledButton(onPressed: () {
+            if (!formKey.currentState!.validate()) return;
+            if (debitCode == creditCode) {
+              ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('اختر حسابين مختلفين')));
+              return;
+            }
+            Navigator.pop(ctx, true);
+          }, child: const Text('ترحيل القيد')),
+        ],
+      )),
+    );
+    if (saved == true && mounted) {
+      final messenger = ScaffoldMessenger.of(context);
+      try {
+        final minor = (double.parse(amount.text.replaceAll(',', '').trim()) * 100).round();
+        await AppDatabase.instance.createJournalEntry(
+          description: description.text,
+          reference: reference.text,
+          entryDate: DateTime.now().toIso8601String().substring(0, 10),
+          lines: [
+            {'account_code': debitCode, 'debit': minor, 'credit': 0},
+            {'account_code': creditCode, 'debit': 0, 'credit': minor},
+          ],
+        );
+        if (!mounted) return;
+        messenger.showSnackBar(const SnackBar(content: Text('تم ترحيل القيد المتوازن بنجاح')));
+        reload();
+      } catch (e) {
+        if (mounted) messenger.showSnackBar(SnackBar(content: Text('لم يتم ترحيل القيد: $e')));
+      }
+    }
+    description.dispose();
+    reference.dispose();
+    amount.dispose();
+  }
+
   @override
-  Widget build(BuildContext context) => Card(elevation: 0, color: Colors.white, child: ListTile(
-    leading: Icon(icon, color: blue, size: 30), title: Text(title), subtitle: Text(subtitle),
-  ));
+  Widget build(BuildContext context) => FutureBuilder<List<Map<String, Object?>>>(
+    key: ValueKey('accounts-$revision'),
+    future: AppDatabase.instance.accounts(),
+    builder: (context, accountSnapshot) {
+      if (accountSnapshot.hasError) return Center(child: Text('تعذر تحميل الحسابات: ${accountSnapshot.error}'));
+      if (!accountSnapshot.hasData) return const Center(child: CircularProgressIndicator());
+      final accounts = accountSnapshot.data!;
+      return ListView(padding: const EdgeInsets.all(16), children: [
+        const Text('المحاسبة والتقارير', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: navy)),
+        const SizedBox(height: 6),
+        const Text('دليل الحسابات وقيود اليومية وميزان المراجعة. لا تُسجل العمليات إلا بعد التحقق من توازنها.'),
+        const SizedBox(height: 12),
+        Wrap(spacing: 8, runSpacing: 8, children: [
+          FilledButton.icon(onPressed: addJournalEntry, icon: const Icon(Icons.add_chart), label: const Text('قيد يومية')),
+          OutlinedButton.icon(onPressed: addAccount, icon: const Icon(Icons.account_tree_outlined), label: const Text('إضافة حساب')),
+        ]),
+        const SizedBox(height: 20),
+        const Text('دليل الحسابات', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: navy)),
+        ...accounts.map((a) => Card(
+          elevation: 0, color: Colors.white,
+          child: ListTile(
+            dense: true,
+            leading: CircleAvatar(backgroundColor: paleBlue, child: Text(a['code'] as String, style: const TextStyle(fontSize: 10, color: blue))),
+            title: Text(a['name'] as String),
+            subtitle: Text(_accountTypeLabel(a['type'] as String)),
+            trailing: const Icon(Icons.account_balance_outlined, color: blue),
+          ),
+        )),
+        const SizedBox(height: 18),
+        const Text('ميزان المراجعة', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: navy)),
+        FutureBuilder<List<Map<String, Object?>>>(
+          key: ValueKey('trial-balance-$revision'),
+          future: AppDatabase.instance.trialBalance(),
+          builder: (context, snapshot) {
+            if (snapshot.hasError) return Text('تعذر تحميل الميزان: ${snapshot.error}');
+            if (!snapshot.hasData) return const Padding(padding: EdgeInsets.all(12), child: LinearProgressIndicator());
+            final rows = snapshot.data!;
+            var totalDebit = 0;
+            var totalCredit = 0;
+            for (final row in rows) {
+              totalDebit += (row['debit_total'] as num).toInt();
+              totalCredit += (row['credit_total'] as num).toInt();
+            }
+            return Column(children: [
+              ...rows.where((r) => (r['debit_total'] as num) != 0 || (r['credit_total'] as num) != 0).map((r) => Card(
+                elevation: 0, color: Colors.white,
+                child: ListTile(
+                  title: Text('${r['code']} - ${r['name']}'),
+                  subtitle: Text('مدين: ${money(r['debit_total'])} ر.ي  |  دائن: ${money(r['credit_total'])} ر.ي'),
+                ),
+              )),
+              Card(
+                color: paleBlue, elevation: 0,
+                child: ListTile(
+                  title: const Text('الإجمالي', style: TextStyle(fontWeight: FontWeight.bold)),
+                  subtitle: Text('مدين: ${money(totalDebit)} ر.ي  |  دائن: ${money(totalCredit)} ر.ي'),
+                  trailing: Icon(totalDebit == totalCredit ? Icons.check_circle : Icons.warning_amber, color: totalDebit == totalCredit ? Colors.green : Colors.red),
+                ),
+              ),
+            ]);
+          },
+        ),
+        const SizedBox(height: 18),
+        const Text('قيود اليومية المرحّلة', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: navy)),
+        FutureBuilder<List<Map<String, Object?>>>(
+          key: ValueKey('journal-$revision'),
+          future: AppDatabase.instance.journalEntries(),
+          builder: (context, snapshot) {
+            if (snapshot.hasError) return Text('تعذر تحميل القيود: ${snapshot.error}');
+            if (!snapshot.hasData) return const Padding(padding: EdgeInsets.all(12), child: LinearProgressIndicator());
+            final rows = snapshot.data!;
+            if (rows.isEmpty) return const Card(elevation: 0, child: Padding(padding: EdgeInsets.all(16), child: Text('لا توجد قيود مرحّلة. أضف أول قيد من زر قيد يومية.')));
+            return Column(children: rows.map((r) => Card(
+              elevation: 0, color: Colors.white,
+              child: ListTile(
+                leading: const Icon(Icons.receipt_long_outlined, color: blue),
+                title: Text(r['description'] as String),
+                subtitle: Text('${r['entry_date']} • مرجع: ${(r['reference'] as String).isEmpty ? '—' : r['reference']}'),
+                trailing: Text('${money(r['debit_total'])} ر.ي', style: const TextStyle(fontWeight: FontWeight.bold)),
+              ),
+            )).toList());
+          },
+        ),
+        const SizedBox(height: 12),
+        const Text('ملاحظة: هذا ميزان مراجعة للقيود المرحّلة فقط؛ لا يمثل بعدُ قوائم مالية نهائية، كما أن فواتير البيع والشراء والسندات لم تُربط بالترحيل في هذه المرحلة.', style: TextStyle(color: Colors.black54)),
+      ]);
+    },
+  );
 }
+
+String _accountTypeLabel(String type) => switch (type) {
+  'asset' => 'أصول',
+  'liability' => 'التزامات',
+  'equity' => 'حقوق ملكية',
+  'revenue' => 'إيرادات',
+  'expense' => 'مصروفات',
+  _ => type,
+};
 
 class CompanyPage extends StatefulWidget {
   const CompanyPage({super.key, required this.onSaved});
