@@ -131,13 +131,67 @@ class AppDatabase {
   Future<List<Map<String, Object?>>> products() async => (await database).query('products', orderBy: 'name COLLATE NOCASE');
 
   Future<void> saveProduct({int? id, required String name, required String sku, required String unit, required int purchasePrice, required int salePrice, required double quantity}) async {
+    final normalizedName = name.trim();
+    if (normalizedName.isEmpty) throw ArgumentError('اسم الصنف مطلوب');
+    if (purchasePrice < 0 || salePrice < 0 || quantity < 0) throw ArgumentError('السعر والكمية لا يمكن أن تكون سالبة');
     final db = await database;
-    final values = {'name': name.trim(), 'sku': sku.trim(), 'unit': unit.trim().isEmpty ? 'قطعة' : unit.trim(), 'purchase_price': purchasePrice, 'sale_price': salePrice, 'quantity': quantity};
-    if (id == null) {
-      await db.insert('products', {...values, 'created_at': _now});
-    } else {
-      await db.update('products', values, where: 'id=?', whereArgs: [id]);
-    }
+    await db.transaction((txn) async {
+      final values = <String, Object>{
+        'name': normalizedName, 'sku': sku.trim(),
+        'unit': unit.trim().isEmpty ? 'قطعة' : unit.trim(),
+        'purchase_price': purchasePrice, 'sale_price': salePrice, 'quantity': quantity,
+      };
+      if (id == null) {
+        final productId = await txn.insert('products', {...values, 'created_at': _now});
+        if (quantity > 0) {
+          await txn.insert('stock_movements', {
+            'product_id': productId, 'movement_date': DateTime.now().toIso8601String().substring(0, 10),
+            'movement_type': 'opening', 'quantity': quantity, 'note': 'رصيد مخزون افتتاحي',
+          });
+          final openingValue = (quantity * purchasePrice).round();
+          if (openingValue > 0) {
+            await _insertPostedEntry(txn,
+              description: 'رصيد مخزون افتتاحي: $normalizedName',
+              entryDate: DateTime.now().toIso8601String().substring(0, 10),
+              reference: 'STOCK-OPEN-$productId',
+              lines: [
+                {'account_code':'1200','debit':openingValue,'credit':0},
+                {'account_code':'3000','debit':0,'credit':openingValue},
+              ]);
+          }
+        }
+        return;
+      }
+      final existingRows = await txn.query('products', where: 'id=?', whereArgs: [id], limit: 1);
+      if (existingRows.isEmpty) throw ArgumentError('الصنف غير موجود');
+      final existing = existingRows.first;
+      final oldQuantity = (existing['quantity'] as num).toDouble();
+      final difference = quantity - oldQuantity;
+      await txn.update('products', values, where: 'id=?', whereArgs: [id]);
+      if (difference.abs() > 0.000001) {
+        final date = DateTime.now().toIso8601String().substring(0, 10);
+        await txn.insert('stock_movements', {
+          'product_id': id, 'movement_date': date, 'movement_type': 'adjustment',
+          'quantity': difference, 'note': 'تسوية كمية يدوية',
+        });
+        final priceForAdjustment = purchasePrice > 0 ? purchasePrice : (existing['purchase_price'] as int);
+        final adjustmentValue = (difference.abs() * priceForAdjustment).round();
+        if (adjustmentValue > 0) {
+          await _insertPostedEntry(txn,
+            description: 'تسوية مخزون يدوية: $normalizedName',
+            entryDate: date, reference: 'STOCK-ADJ-$id-${DateTime.now().microsecondsSinceEpoch}',
+            lines: difference > 0
+              ? [
+                  {'account_code':'1200','debit':adjustmentValue,'credit':0},
+                  {'account_code':'4100','debit':0,'credit':adjustmentValue},
+                ]
+              : [
+                  {'account_code':'6000','debit':adjustmentValue,'credit':0},
+                  {'account_code':'1200','debit':0,'credit':adjustmentValue},
+                ]);
+        }
+      }
+    });
   }
 
   Future<void> deleteProduct(int id) async { await (await database).delete('products', where: 'id=?', whereArgs: [id]); }
@@ -265,6 +319,23 @@ class AppDatabase {
       if (discount > subtotal) throw ArgumentError('الخصم أكبر من إجمالي الفاتورة');
       final total = subtotal - discount;
       if (total <= 0) throw ArgumentError('إجمالي الفاتورة يجب أن يكون أكبر من صفر');
+      var allocatedDiscount = 0;
+      for (var i = 0; i < prepared.length; i++) {
+        final line = prepared[i];
+        final grossLineTotal = line['line_total'] as int;
+        final share = i == prepared.length - 1
+          ? discount - allocatedDiscount
+          : (discount * grossLineTotal / subtotal).round().clamp(0, discount - allocatedDiscount);
+        allocatedDiscount += share;
+        final netLineTotal = grossLineTotal - share;
+        line['line_total'] = netLineTotal;
+        if (invoiceType == 'purchase') {
+          final quantity = line['quantity'] as double;
+          final effectiveUnitCost = (netLineTotal / quantity).round();
+          line['unit_cost'] = effectiveUnitCost;
+          line['cost_total'] = netLineTotal;
+        }
+      }
       final invoiceNumber = (invoiceType == 'sale' ? 'S-' : 'P-') +
           DateTime.now().microsecondsSinceEpoch.toString();
       final invoiceId = await txn.insert('invoices', {
@@ -290,7 +361,7 @@ class AppDatabase {
           'quantity': invoiceType == 'sale' ? -quantity : quantity,
           'note': 'فاتورة $invoiceNumber',
         });
-        if (invoiceType == 'purchase') purchasePriceByProduct[productId] = line['unit_price'] as int;
+        if (invoiceType == 'purchase') purchasePriceByProduct[productId] = line['unit_cost'] as int;
       }
       for (final entry in requestedByProduct.entries) {
         final productRows = await txn.query('products', columns: ['quantity'], where: 'id=?', whereArgs: [entry.key], limit: 1);
@@ -554,9 +625,11 @@ class AppDatabase {
       final remaining = originalQuantity - returned;
       if (quantity > remaining + 0.000001) throw ArgumentError('الكمية تتجاوز المتبقي القابل للإرجاع: $remaining');
       final productId = line['product_id'] as int;
-      final unitPrice = line['unit_price'] as int;
+      final originalQuantity = (line['quantity'] as num).toDouble();
       final unitCost = line['unit_cost'] as int;
-      final amount = (quantity * unitPrice).round();
+      final netLineTotal = line['line_total'] as int;
+      final amount = (quantity * netLineTotal / originalQuantity).round();
+      final returnUnitPrice = (netLineTotal / originalQuantity).round();
       final cost = (quantity * unitCost).round();
       if (amount <= 0) throw ArgumentError('قيمة المرتجع يجب أن تكون أكبر من صفر');
       final stock = (line['stock'] as num).toDouble();
@@ -569,7 +642,7 @@ class AppDatabase {
       });
       await txn.insert('return_lines', {
         'return_id': returnId, 'original_line_id': invoiceLineId,
-        'product_id': productId, 'quantity': quantity, 'unit_price': unitPrice,
+        'product_id': productId, 'quantity': quantity, 'unit_price': returnUnitPrice,
         'unit_cost': unitCost, 'line_total': amount,
       });
       await txn.update('products', {
