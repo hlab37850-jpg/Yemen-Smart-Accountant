@@ -10,7 +10,7 @@ class AppDatabase {
     if (_db != null) return _db!;
     _db = await openDatabase(
       p.join(await getDatabasesPath(), 'yemen_smart_accountant.db'),
-      version: 3,
+      version: 4,
       onConfigure: (db) async { await db.execute('PRAGMA foreign_keys = ON'); },
       onCreate: (db, version) async {
         await _createBaseSchema(db);
@@ -24,6 +24,7 @@ class AppDatabase {
           await _seedAccounts(db);
         }
         if (oldVersion < 3) await _createInvoiceSchema(db);
+        if (oldVersion < 4) await db.execute('ALTER TABLE vouchers ADD COLUMN journal_entry_id INTEGER REFERENCES journal_entries(id)');
       },
     );
     return _db!;
@@ -37,7 +38,7 @@ class AppDatabase {
     await db.execute("CREATE TABLE journal_entries (id INTEGER PRIMARY KEY AUTOINCREMENT, entry_date TEXT NOT NULL, description TEXT NOT NULL, reference TEXT NOT NULL DEFAULT '', posted INTEGER NOT NULL DEFAULT 0 CHECK(posted IN (0,1)), created_at TEXT NOT NULL)");
     await db.execute('CREATE TABLE journal_lines (id INTEGER PRIMARY KEY AUTOINCREMENT, entry_id INTEGER NOT NULL REFERENCES journal_entries(id) ON DELETE CASCADE, account_code TEXT NOT NULL, account_name TEXT NOT NULL, debit INTEGER NOT NULL DEFAULT 0 CHECK(debit>=0), credit INTEGER NOT NULL DEFAULT 0 CHECK(credit>=0), CHECK(debit=0 OR credit=0))');
     await db.execute('CREATE TABLE stock_movements (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL REFERENCES products(id), movement_date TEXT NOT NULL, movement_type TEXT NOT NULL, quantity REAL NOT NULL CHECK(quantity!=0), note TEXT NOT NULL DEFAULT "")');
-    await db.execute("CREATE TABLE vouchers (id INTEGER PRIMARY KEY AUTOINCREMENT, voucher_type TEXT NOT NULL CHECK(voucher_type IN ('receipt','payment')), voucher_date TEXT NOT NULL, contact_id INTEGER REFERENCES contacts(id), amount INTEGER NOT NULL CHECK(amount>0), method TEXT NOT NULL DEFAULT 'cash', note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)");
+    await db.execute("CREATE TABLE vouchers (id INTEGER PRIMARY KEY AUTOINCREMENT, voucher_type TEXT NOT NULL CHECK(voucher_type IN ('receipt','payment')), voucher_date TEXT NOT NULL, contact_id INTEGER REFERENCES contacts(id), amount INTEGER NOT NULL CHECK(amount>0), method TEXT NOT NULL DEFAULT 'cash', note TEXT NOT NULL DEFAULT '', journal_entry_id INTEGER REFERENCES journal_entries(id), created_at TEXT NOT NULL)");
   }
 
   Future<void> _createAccountingSchema(DatabaseExecutor db) async {
@@ -329,6 +330,59 @@ class AppDatabase {
       await txn.insert('journal_lines', {...line, 'entry_id': entryId});
     }
     return entryId;
+  }
+
+  Future<int> createVoucher({
+    required String voucherType,
+    required String voucherDate,
+    required int contactId,
+    required int amount,
+    required String method,
+    String note = '',
+  }) async {
+    if (voucherType != 'receipt' && voucherType != 'payment') throw ArgumentError('نوع السند غير صالح');
+    if (amount <= 0) throw ArgumentError('مبلغ السند يجب أن يكون أكبر من صفر');
+    if (!{'cash','bank'}.contains(method)) throw ArgumentError('طريقة السداد غير صالحة');
+    final db = await database;
+    return db.transaction<int>((txn) async {
+      final expectedKind = voucherType == 'receipt' ? 'customer' : 'supplier';
+      final contact = await txn.query('contacts', where: 'id=? AND kind=?', whereArgs: [contactId, expectedKind], limit: 1);
+      if (contact.isEmpty) throw ArgumentError(voucherType == 'receipt' ? 'اختر عميلاً صحيحاً' : 'اختر مورداً صحيحاً');
+      final voucherId = await txn.insert('vouchers', {
+        'voucher_type': voucherType, 'voucher_date': voucherDate,
+        'contact_id': contactId, 'amount': amount, 'method': method,
+        'note': note.trim(), 'created_at': _now,
+      });
+      final reference = (voucherType == 'receipt' ? 'R-' : 'P-') + voucherId.toString();
+      final lines = voucherType == 'receipt'
+          ? [
+              {'account_code': method == 'bank' ? '1010' : '1000', 'debit': amount, 'credit': 0},
+              {'account_code': '1100', 'debit': 0, 'credit': amount},
+            ]
+          : [
+              {'account_code': '2000', 'debit': amount, 'credit': 0},
+              {'account_code': method == 'bank' ? '1010' : '1000', 'debit': 0, 'credit': amount},
+            ];
+      final entryId = await _insertPostedEntry(
+        txn,
+        description: (voucherType == 'receipt' ? 'سند قبض ' : 'سند صرف ') + reference,
+        entryDate: voucherDate,
+        reference: reference,
+        lines: lines,
+      );
+      await txn.update('vouchers', {'journal_entry_id': entryId}, where: 'id=?', whereArgs: [voucherId]);
+      return voucherId;
+    });
+  }
+
+  Future<List<Map<String, Object?>>> vouchers() async {
+    final db = await database;
+    return db.rawQuery('''
+      SELECT v.id, v.voucher_type, v.voucher_date, v.amount, v.method, v.note,
+        c.name AS contact_name
+      FROM vouchers v LEFT JOIN contacts c ON c.id=v.contact_id
+      ORDER BY v.voucher_date DESC, v.id DESC
+    ''');
   }
 
   Future<List<Map<String, Object?>>> invoices() async {
