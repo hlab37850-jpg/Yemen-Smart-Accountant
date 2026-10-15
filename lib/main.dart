@@ -229,12 +229,13 @@ class _ContactsPageState extends State<ContactsPage> {
           itemBuilder: (context, i) {
             final row = rows[i];
             final phone = row['phone'] as String;
+            final currentBalance = (row['opening_balance'] as int) + (row['transaction_total'] as num).toInt() - (row['settled_total'] as num).toInt();
             return Card(
               elevation: 0, color: Colors.white,
               child: ListTile(
                 leading: const CircleAvatar(backgroundColor: paleBlue, child: Icon(Icons.person_outline, color: blue)),
                 title: Text(row['name'] as String, style: const TextStyle(fontWeight: FontWeight.bold)),
-                subtitle: Text((phone.isEmpty ? '' : phone + ' • ') + 'الرصيد الافتتاحي: ' + ((row['opening_balance'] as int) / 100).toStringAsFixed(2) + ' ر.ي'),
+                subtitle: Text((phone.isEmpty ? '' : phone + ' • ') + 'الرصيد الحالي: ' + (currentBalance / 100).toStringAsFixed(2) + ' ر.ي'),
                 onTap: () => openEditor(row),
                 trailing: IconButton(
                   tooltip: 'حذف', icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
