@@ -279,6 +279,71 @@ void main() {
     expect(await AppDatabase.instance.returns(), isNotEmpty);
   });
 
+  test('opening inventory and manual quantity adjustments post balanced entries', () async {
+    final marker = 'OPEN-STOCK-${DateTime.now().microsecondsSinceEpoch}';
+    final before = await AppDatabase.instance.trialBalance();
+    int debitFor(List<Map<String, Object?>> rows, String code) =>
+      (rows.firstWhere((r) => r['code'] == code)['debit_total'] as num).toInt();
+    int creditFor(List<Map<String, Object?>> rows, String code) =>
+      (rows.firstWhere((r) => r['code'] == code)['credit_total'] as num).toInt();
+    await AppDatabase.instance.saveProduct(
+      name: marker, sku: marker, unit: 'قطعة',
+      purchasePrice: 2500, salePrice: 3000, quantity: 4,
+    );
+    final product = (await AppDatabase.instance.products()).firstWhere((p) => p['sku'] == marker);
+    var after = await AppDatabase.instance.trialBalance();
+    expect(debitFor(after, '1200') - debitFor(before, '1200'), 10000);
+    expect(creditFor(after, '3000') - creditFor(before, '3000'), 10000);
+    await AppDatabase.instance.saveProduct(
+      id: product['id'] as int, name: marker, sku: marker, unit: 'قطعة',
+      purchasePrice: 2500, salePrice: 3000, quantity: 6,
+    );
+    after = await AppDatabase.instance.trialBalance();
+    expect(debitFor(after, '1200') - debitFor(before, '1200'), 15000);
+    final movements = await AppDatabase.instance.stockMovements(productId: product['id'] as int);
+    expect(movements.length, 2);
+  });
+
+  test('purchase discount is allocated to stock cost and invoice lines', () async {
+    final marker = 'DISCOUNT-PURCHASE-${DateTime.now().microsecondsSinceEpoch}';
+    await AppDatabase.instance.saveContact(name: marker, phone: '', address: '', kind: 'supplier', openingBalance: 0);
+    final contact = (await AppDatabase.instance.contacts('supplier')).firstWhere((c) => c['name'] == marker);
+    await AppDatabase.instance.saveProduct(name: marker, sku: marker, unit: 'قطعة', purchasePrice: 1000, salePrice: 7000, quantity: 0);
+    final product = (await AppDatabase.instance.products()).firstWhere((p) => p['sku'] == marker);
+    final invoiceId = await AppDatabase.instance.createInvoice(
+      invoiceType: 'purchase', invoiceDate: '2026-10-15',
+      contactId: contact['id'] as int, discount: 2000,
+      lines: [{'product_id': product['id'] as int, 'quantity': 2, 'unit_price': 5000}],
+    );
+    final line = (await AppDatabase.instance.invoiceLines(invoiceId)).single;
+    expect(line['line_total'], 8000);
+    expect(line['cost_total'], 8000);
+    expect(line['unit_cost'], 4000);
+    final refreshed = (await AppDatabase.instance.products()).firstWhere((p) => p['id'] == product['id']);
+    expect(refreshed['purchase_price'], 4000);
+  });
+
+  test('contact statement and current balance account for sales returns', () async {
+    final marker = 'STATEMENT-${DateTime.now().microsecondsSinceEpoch}';
+    await AppDatabase.instance.saveContact(name: marker, phone: '', address: '', kind: 'customer', openingBalance: 1000);
+    final contact = (await AppDatabase.instance.contacts('customer')).firstWhere((c) => c['name'] == marker);
+    await AppDatabase.instance.saveProduct(name: marker, sku: marker, unit: 'قطعة', purchasePrice: 1000, salePrice: 3000, quantity: 4);
+    final product = (await AppDatabase.instance.products()).firstWhere((p) => p['sku'] == marker);
+    final invoiceId = await AppDatabase.instance.createInvoice(
+      invoiceType: 'sale', invoiceDate: '2026-10-15', contactId: contact['id'] as int,
+      lines: [{'product_id': product['id'] as int, 'quantity': 2, 'unit_price': 3000}],
+    );
+    final line = (await AppDatabase.instance.invoiceLines(invoiceId)).single;
+    await AppDatabase.instance.createReturn(
+      invoiceId: invoiceId, invoiceLineId: line['id'] as int, quantity: 1, returnDate: '2026-10-15',
+    );
+    final refreshed = (await AppDatabase.instance.contacts('customer')).firstWhere((c) => c['id'] == contact['id']);
+    expect((refreshed['opening_balance'] as int) + (refreshed['transaction_total'] as num).toInt(), 4000);
+    final statement = await AppDatabase.instance.contactStatement(contact['id'] as int);
+    expect(statement.length, 3);
+    expect(statement.last['balance'], 4000);
+  });
+
   test('backup export and restore preserve local records', () async {
     final marker = 'BACKUP-${DateTime.now().microsecondsSinceEpoch}';
     await AppDatabase.instance.saveContact(name: marker, phone: '777', address: 'test', kind: 'customer', openingBalance: 500);
