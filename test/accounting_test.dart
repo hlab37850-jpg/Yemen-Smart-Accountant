@@ -165,4 +165,31 @@ void main() {
     expect(entry['credit_total'], 7500);
   });
 
+  test('customer current balance includes opening balance, invoices and receipts', () async {
+    final marker = 'BALANCE-${DateTime.now().microsecondsSinceEpoch}';
+    await AppDatabase.instance.saveContact(
+      name: marker, phone: '', address: '', kind: 'customer', openingBalance: 10000,
+    );
+    final contact = (await AppDatabase.instance.contacts('customer')).firstWhere((c) => c['name'] == marker);
+    await AppDatabase.instance.saveProduct(
+      name: marker, sku: marker, unit: 'قطعة',
+      purchasePrice: 1000, salePrice: 5000, quantity: 5,
+    );
+    final product = (await AppDatabase.instance.products()).firstWhere((p) => p['sku'] == marker);
+    await AppDatabase.instance.createInvoice(
+      invoiceType: 'sale', invoiceDate: '2026-10-15',
+      contactId: contact['id'] as int,
+      lines: [{'product_id': product['id'] as int, 'quantity': 1, 'unit_price': 5000}],
+    );
+    await AppDatabase.instance.createVoucher(
+      voucherType: 'receipt', voucherDate: '2026-10-15',
+      contactId: contact['id'] as int, amount: 2000, method: 'cash',
+    );
+    final updated = (await AppDatabase.instance.contacts('customer')).firstWhere((c) => c['id'] == contact['id']);
+    final current = (updated['opening_balance'] as int) +
+        (updated['transaction_total'] as num).toInt() -
+        (updated['settled_total'] as num).toInt();
+    expect(current, 13000);
+  });
+
 }
