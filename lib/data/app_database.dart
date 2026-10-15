@@ -235,6 +235,7 @@ class AppDatabase {
       var subtotal = 0;
       var costTotal = 0;
       final prepared = <Map<String, Object>>[];
+      final requestedByProduct = <int, double>{};
       for (final line in lines) {
         final productId = line['product_id'] as int;
         final quantity = (line['quantity'] as num).toDouble();
@@ -245,8 +246,10 @@ class AppDatabase {
         final product = productRows.first;
         final stock = (product['quantity'] as num).toDouble();
         final unitCost = invoiceType == 'purchase' ? unitPrice : (product['purchase_price'] as int);
-        if (invoiceType == 'sale' && stock < quantity) {
-          throw ArgumentError('الكمية المتوفرة من ${product['name']} غير كافية');
+        final requested = (requestedByProduct[productId] ?? 0) + quantity;
+        requestedByProduct[productId] = requested;
+        if (invoiceType == 'sale' && stock < requested - 0.000001) {
+          throw ArgumentError('الكمية المتوفرة من ${product['name']} غير كافية للكمية الإجمالية المطلوبة');
         }
         final lineTotal = (quantity * unitPrice).round();
         final lineCost = (quantity * unitCost).round();
@@ -270,6 +273,7 @@ class AppDatabase {
         'subtotal': subtotal, 'discount': discount, 'total': total,
         'created_at': _now,
       });
+      final purchasePriceByProduct = <int, int>{};
       for (final line in prepared) {
         await txn.insert('invoice_lines', {
           'invoice_id': invoiceId, 'product_id': line['product_id'],
@@ -277,19 +281,24 @@ class AppDatabase {
           'unit_cost': line['unit_cost'], 'line_total': line['line_total'],
           'cost_total': line['cost_total'],
         });
-        final oldQuantity = line['old_quantity'] as double;
+        final productId = line['product_id'] as int;
         final quantity = line['quantity'] as double;
-        final newQuantity = invoiceType == 'sale' ? oldQuantity - quantity : oldQuantity + quantity;
-        final updateValues = <String, Object>{'quantity': newQuantity};
-        if (invoiceType == 'purchase') updateValues['purchase_price'] = line['unit_price'] as int;
-        await txn.update('products', updateValues, where: 'id=?', whereArgs: [line['product_id']]);
         await txn.insert('stock_movements', {
-          'product_id': line['product_id'],
+          'product_id': productId,
           'movement_date': invoiceDate,
           'movement_type': invoiceType == 'sale' ? 'sale' : 'purchase',
           'quantity': invoiceType == 'sale' ? -quantity : quantity,
           'note': 'فاتورة $invoiceNumber',
         });
+        if (invoiceType == 'purchase') purchasePriceByProduct[productId] = line['unit_price'] as int;
+      }
+      for (final entry in requestedByProduct.entries) {
+        final productRows = await txn.query('products', columns: ['quantity'], where: 'id=?', whereArgs: [entry.key], limit: 1);
+        final current = (productRows.first['quantity'] as num).toDouble();
+        final next = invoiceType == 'sale' ? current - entry.value : current + entry.value;
+        final values = <String, Object>{'quantity': next};
+        if (invoiceType == 'purchase') values['purchase_price'] = purchasePriceByProduct[entry.key]!;
+        await txn.update('products', values, where: 'id=?', whereArgs: [entry.key]);
       }
       final mainLines = invoiceType == 'sale'
           ? [
@@ -439,7 +448,7 @@ class AppDatabase {
       SELECT a.code, a.name, a.type,
         COALESCE(SUM(l.debit),0) AS debit_total,
         COALESCE(SUM(l.credit),0) AS credit_total
-      FROM accounts a LEFT JOIN journal_lines l ON l.account_code=a.code
+      FROM accounts a LEFT JOIN journal_lines l ON l.account_code=a.code AND l.entry_id IN (SELECT id FROM journal_entries WHERE posted=1)
       WHERE a.active=1
       GROUP BY a.code, a.name, a.type
       ORDER BY a.code
