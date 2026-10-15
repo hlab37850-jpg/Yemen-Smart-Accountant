@@ -222,7 +222,7 @@ class _ContactsPageState extends State<ContactsPage> {
               ? const Center(child: Text('لا توجد حركات على هذا الطرف.'))
               : ListView.separated(
                   itemCount: rows.length,
-                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  separatorBuilder: (_, _) => const Divider(height: 1),
                   itemBuilder: (ctx, index) {
                     final row = rows[index];
                     final debit = (row['debit'] as num).toInt();
@@ -236,7 +236,7 @@ class _ContactsPageState extends State<ContactsPage> {
                         width: 92,
                         child: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.end, children: [
                           const Text('الرصيد', style: TextStyle(fontSize: 10, color: Colors.black54)),
-                          Text('${(balance.abs() / 100).toStringAsFixed(2)}', style: const TextStyle(fontWeight: FontWeight.bold)),
+                          Text((balance.abs() / 100).toStringAsFixed(2), style: const TextStyle(fontWeight: FontWeight.bold)),
                           Text(balance == 0 ? 'صفر' : ((balance > 0) == isCustomer ? 'مدين' : 'دائن'), style: const TextStyle(fontSize: 10)),
                         ]),
                       ),
@@ -300,7 +300,8 @@ class _ContactsPageState extends State<ContactsPage> {
                           setState(() {});
                           widget.onChanged();
                         } catch (e) {
-                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر حذف الطرف المرتبط بحركات: $e')));
+                          if (!mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر حذف الطرف المرتبط بحركات: $e')));
                         }
                       }
                     },
