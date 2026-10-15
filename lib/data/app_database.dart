@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 
@@ -10,13 +11,14 @@ class AppDatabase {
     if (_db != null) return _db!;
     _db = await openDatabase(
       p.join(await getDatabasesPath(), 'yemen_smart_accountant.db'),
-      version: 4,
+      version: 5,
       onConfigure: (db) async { await db.execute('PRAGMA foreign_keys = ON'); },
       onCreate: (db, version) async {
         await _createBaseSchema(db);
         await _createAccountingSchema(db);
         await _seedAccounts(db);
         await _createInvoiceSchema(db);
+        await _createReturnsSchema(db);
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -25,6 +27,7 @@ class AppDatabase {
         }
         if (oldVersion < 3) await _createInvoiceSchema(db);
         if (oldVersion < 4) await db.execute('ALTER TABLE vouchers ADD COLUMN journal_entry_id INTEGER REFERENCES journal_entries(id)');
+        if (oldVersion < 5) await _createReturnsSchema(db);
       },
     );
     return _db!;
@@ -59,6 +62,7 @@ class AppDatabase {
       {'code':'3100','name':'الأرباح المحتجزة','type':'equity'},
       {'code':'4000','name':'المبيعات','type':'revenue'},
       {'code':'4100','name':'إيرادات أخرى','type':'revenue'},
+      {'code':'4200','name':'مرتجعات المبيعات','type':'revenue'},
       {'code':'5000','name':'تكلفة البضاعة المباعة','type':'expense'},
       {'code':'6000','name':'المصروفات التشغيلية','type':'expense'},
     ];
@@ -72,6 +76,14 @@ class AppDatabase {
     await db.execute("CREATE TABLE IF NOT EXISTS invoice_lines (id INTEGER PRIMARY KEY AUTOINCREMENT, invoice_id INTEGER NOT NULL REFERENCES invoices(id) ON DELETE CASCADE, product_id INTEGER NOT NULL REFERENCES products(id), quantity REAL NOT NULL CHECK(quantity>0), unit_price INTEGER NOT NULL CHECK(unit_price>=0), unit_cost INTEGER NOT NULL CHECK(unit_cost>=0), line_total INTEGER NOT NULL CHECK(line_total>=0), cost_total INTEGER NOT NULL CHECK(cost_total>=0))");
     await db.execute('CREATE INDEX IF NOT EXISTS idx_invoices_date ON invoices(invoice_date)');
     await db.execute('CREATE INDEX IF NOT EXISTS idx_invoice_lines_invoice ON invoice_lines(invoice_id)');
+  }
+
+
+  Future<void> _createReturnsSchema(DatabaseExecutor db) async {
+    await db.execute("CREATE TABLE IF NOT EXISTS returns (id INTEGER PRIMARY KEY AUTOINCREMENT, return_type TEXT NOT NULL CHECK(return_type IN ('sale_return','purchase_return')), invoice_id INTEGER NOT NULL REFERENCES invoices(id), return_date TEXT NOT NULL, amount INTEGER NOT NULL CHECK(amount>0), journal_entry_id INTEGER REFERENCES journal_entries(id), note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)");
+    await db.execute("CREATE TABLE IF NOT EXISTS return_lines (id INTEGER PRIMARY KEY AUTOINCREMENT, return_id INTEGER NOT NULL REFERENCES returns(id) ON DELETE CASCADE, original_line_id INTEGER NOT NULL REFERENCES invoice_lines(id), product_id INTEGER NOT NULL REFERENCES products(id), quantity REAL NOT NULL CHECK(quantity>0), unit_price INTEGER NOT NULL CHECK(unit_price>=0), unit_cost INTEGER NOT NULL CHECK(unit_cost>=0), line_total INTEGER NOT NULL CHECK(line_total>0))");
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_returns_invoice ON returns(invoice_id)');
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_return_lines_original ON return_lines(original_line_id)');
   }
 
   String get _now => DateTime.now().toIso8601String();
@@ -492,5 +504,172 @@ class AppDatabase {
       ORDER BY m.movement_date DESC, m.id DESC
     ''', [productId]);
   }
+
+
+  Future<List<Map<String, Object?>>> returns() async {
+    final db = await database;
+    return db.rawQuery('''
+      SELECT r.id, r.return_type, r.return_date, r.amount, r.note,
+        i.invoice_number, c.name AS contact_name
+      FROM returns r JOIN invoices i ON i.id=r.invoice_id
+      JOIN contacts c ON c.id=i.contact_id
+      ORDER BY r.return_date DESC, r.id DESC
+    ''');
+  }
+
+  Future<int> createReturn({
+    required int invoiceId,
+    required int invoiceLineId,
+    required double quantity,
+    required String returnDate,
+    String note = '',
+  }) async {
+    if (quantity <= 0) throw ArgumentError('كمية المرتجع يجب أن تكون أكبر من صفر');
+    final db = await database;
+    return db.transaction<int>((txn) async {
+      final invoices = await txn.query('invoices', where: 'id=?', whereArgs: [invoiceId], limit: 1);
+      if (invoices.isEmpty) throw ArgumentError('الفاتورة الأصلية غير موجودة');
+      final invoice = invoices.first;
+      final invoiceType = invoice['invoice_type'] as String;
+      final returnType = invoiceType == 'sale' ? 'sale_return' : 'purchase_return';
+      final lines = await txn.rawQuery('''
+        SELECT il.*, p.name AS product_name, p.quantity AS stock
+        FROM invoice_lines il JOIN products p ON p.id=il.product_id
+        WHERE il.id=? AND il.invoice_id=?
+      ''', [invoiceLineId, invoiceId]);
+      if (lines.isEmpty) throw ArgumentError('الصنف لا يتبع الفاتورة المحددة');
+      final line = lines.first;
+      final priorRows = await txn.rawQuery('SELECT COALESCE(SUM(quantity),0) AS qty FROM return_lines WHERE original_line_id=?', [invoiceLineId]);
+      final returned = (priorRows.first['qty'] as num).toDouble();
+      final originalQuantity = (line['quantity'] as num).toDouble();
+      final remaining = originalQuantity - returned;
+      if (quantity > remaining + 0.000001) throw ArgumentError('الكمية تتجاوز المتبقي القابل للإرجاع: $remaining');
+      final productId = line['product_id'] as int;
+      final unitPrice = line['unit_price'] as int;
+      final unitCost = line['unit_cost'] as int;
+      final amount = (quantity * unitPrice).round();
+      final cost = (quantity * unitCost).round();
+      if (amount <= 0) throw ArgumentError('قيمة المرتجع يجب أن تكون أكبر من صفر');
+      final stock = (line['stock'] as num).toDouble();
+      if (returnType == 'purchase_return' && stock < quantity) {
+        throw ArgumentError('لا يمكن إرجاع كمية أكبر من المخزون المتاح');
+      }
+      final returnId = await txn.insert('returns', {
+        'return_type': returnType, 'invoice_id': invoiceId, 'return_date': returnDate,
+        'amount': amount, 'note': note.trim(), 'created_at': _now,
+      });
+      await txn.insert('return_lines', {
+        'return_id': returnId, 'original_line_id': invoiceLineId,
+        'product_id': productId, 'quantity': quantity, 'unit_price': unitPrice,
+        'unit_cost': unitCost, 'line_total': amount,
+      });
+      await txn.update('products', {
+        'quantity': returnType == 'sale_return' ? stock + quantity : stock - quantity,
+      }, where: 'id=?', whereArgs: [productId]);
+      await txn.insert('stock_movements', {
+        'product_id': productId, 'movement_date': returnDate,
+        'movement_type': returnType, 'quantity': returnType == 'sale_return' ? quantity : -quantity,
+        'note': 'مرتجع الفاتورة ${invoice['invoice_number']}',
+      });
+      final mainLines = returnType == 'sale_return'
+        ? [
+            {'account_code':'4200','debit':amount,'credit':0},
+            {'account_code':'1100','debit':0,'credit':amount},
+          ]
+        : [
+            {'account_code':'2000','debit':amount,'credit':0},
+            {'account_code':'1200','debit':0,'credit':amount},
+          ];
+      final entryId = await _insertPostedEntry(
+        txn,
+        description: returnType == 'sale_return' ? 'مرتجع مبيعات ${invoice['invoice_number']}' : 'مرتجع مشتريات ${invoice['invoice_number']}',
+        entryDate: returnDate,
+        reference: 'RET-$returnId',
+        lines: mainLines,
+      );
+      if (returnType == 'sale_return' && cost > 0) {
+        await _insertPostedEntry(txn,
+          description: 'إعادة تكلفة مخزون مرتجع ${invoice['invoice_number']}',
+          entryDate: returnDate, reference: 'RET-$returnId',
+          lines: [
+            {'account_code':'1200','debit':cost,'credit':0},
+            {'account_code':'5000','debit':0,'credit':cost},
+          ]);
+      }
+      await txn.update('returns', {'journal_entry_id':entryId}, where:'id=?', whereArgs:[returnId]);
+      return returnId;
+    });
+  }
+
+  Future<String> exportBackupJson() async {
+    final db = await database;
+    const tables = [
+      'company_settings','accounts','contacts','products','journal_entries',
+      'journal_lines','stock_movements','invoices','invoice_lines','vouchers',
+      'returns','return_lines'
+    ];
+    final payload = <String, Object?>{
+      'format': 'yemen-smart-accountant-backup',
+      'version': 1,
+      'exported_at': _now,
+      'tables': <String, Object?>{},
+    };
+    final resultTables = payload['tables'] as Map<String, Object?>;
+    for (final table in tables) {
+      try {
+        resultTables[table] = await db.query(table);
+      } catch (_) {
+        resultTables[table] = <Map<String, Object?>>[];
+      }
+    }
+    return const JsonEncoder.withIndent('  ').convert(payload);
+  }
+
+  Future<void> importBackupJson(String source) async {
+    final decoded = jsonDecode(source);
+    if (decoded is! Map || decoded['format'] != 'yemen-smart-accountant-backup' ||
+        decoded['version'] != 1 || decoded['tables'] is! Map) {
+      throw const FormatException('ملف النسخة الاحتياطية غير معروف أو غير مدعوم');
+    }
+    final tables = decoded['tables'] as Map;
+    const allowed = {
+      'company_settings','accounts','contacts','products','journal_entries',
+      'journal_lines','stock_movements','invoices','invoice_lines','vouchers',
+      'returns','return_lines'
+    };
+    for (final key in tables.keys) {
+      if (!allowed.contains(key)) throw FormatException('جدول غير مسموح: $key');
+      if (tables[key] is! List) throw FormatException('بيانات الجدول غير صالحة: $key');
+    }
+    final db = await database;
+    await db.transaction((txn) async {
+      await txn.execute('PRAGMA defer_foreign_keys = ON');
+      for (final table in [
+        'return_lines','returns','invoice_lines','invoices','vouchers',
+        'stock_movements','journal_lines','journal_entries','contacts',
+        'products','company_settings','accounts'
+      ]) {
+        await txn.delete(table);
+      }
+      const insertOrder = [
+        'company_settings','accounts','contacts','products','journal_entries',
+        'journal_lines','stock_movements','invoices','invoice_lines','vouchers',
+        'returns','return_lines'
+      ];
+      for (final table in insertOrder) {
+        final rows = tables[table];
+        if (rows == null) continue;
+        for (final raw in rows as List) {
+          if (raw is! Map) throw FormatException('سجل غير صالح في $table');
+          final values = <String, Object?>{};
+          raw.forEach((key, value) {
+            if (key is String) values[key] = value;
+          });
+          await txn.insert(table, values, conflictAlgorithm: ConflictAlgorithm.replace);
+        }
+      }
+    });
+  }
+
 
 }
