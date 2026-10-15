@@ -293,6 +293,7 @@ class _ContactsPageState extends State<ContactsPage> {
                   IconButton(
                     tooltip: 'حذف', icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
                     onPressed: () async {
+                      final messenger = ScaffoldMessenger.of(context);
                       if (await confirmDelete(context) && mounted) {
                         try {
                           await AppDatabase.instance.deleteContact(row['id'] as int);
