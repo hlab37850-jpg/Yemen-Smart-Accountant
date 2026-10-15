@@ -325,7 +325,7 @@ class AppDatabase {
         final grossLineTotal = line['line_total'] as int;
         final share = i == prepared.length - 1
           ? discount - allocatedDiscount
-          : (discount * grossLineTotal / subtotal).round().clamp(0, discount - allocatedDiscount);
+          : (discount * grossLineTotal / subtotal).round().clamp(0, discount - allocatedDiscount).toInt();
         allocatedDiscount += share;
         final netLineTotal = grossLineTotal - share;
         line['line_total'] = netLineTotal;
@@ -545,8 +545,7 @@ class AppDatabase {
         COALESCE(SUM(l.debit),0) AS debits,
         COALESCE(SUM(l.credit),0) AS credits
       FROM accounts a
-      LEFT JOIN journal_lines l ON l.account_code=a.code
-      LEFT JOIN journal_entries e ON e.id=l.entry_id AND e.posted=1
+      LEFT JOIN journal_lines l ON l.account_code=a.code AND l.entry_id IN (SELECT id FROM journal_entries WHERE posted=1)
       WHERE a.active=1
       GROUP BY a.type
     ''');
@@ -625,7 +624,6 @@ class AppDatabase {
       final remaining = originalQuantity - returned;
       if (quantity > remaining + 0.000001) throw ArgumentError('الكمية تتجاوز المتبقي القابل للإرجاع: $remaining');
       final productId = line['product_id'] as int;
-      final originalQuantity = (line['quantity'] as num).toDouble();
       final unitCost = line['unit_cost'] as int;
       final netLineTotal = line['line_total'] as int;
       final amount = (quantity * netLineTotal / originalQuantity).round();
