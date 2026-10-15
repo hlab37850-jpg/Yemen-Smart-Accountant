@@ -120,4 +120,49 @@ void main() {
     final refreshed = (await AppDatabase.instance.products()).firstWhere((p) => p['id'] == product['id']);
     expect((refreshed['quantity'] as num).toDouble(), 1);
   });
+  test('purchase invoice increases stock and updates purchase cost', () async {
+    final marker = 'PURCHASE-${DateTime.now().microsecondsSinceEpoch}';
+    await AppDatabase.instance.saveContact(
+      name: marker, phone: '', address: '', kind: 'supplier', openingBalance: 0,
+    );
+    final contact = (await AppDatabase.instance.contacts('supplier')).firstWhere((c) => c['name'] == marker);
+    await AppDatabase.instance.saveProduct(
+      name: marker, sku: marker, unit: 'قطعة',
+      purchasePrice: 1000, salePrice: 2000, quantity: 1,
+    );
+    final product = (await AppDatabase.instance.products()).firstWhere((p) => p['sku'] == marker);
+    final invoiceId = await AppDatabase.instance.createInvoice(
+      invoiceType: 'purchase', invoiceDate: '2026-10-15',
+      contactId: contact['id'] as int,
+      lines: [{'product_id': product['id'] as int, 'quantity': 3, 'unit_price': 4000}],
+    );
+    final refreshed = (await AppDatabase.instance.products()).firstWhere((p) => p['id'] == product['id']);
+    expect((refreshed['quantity'] as num).toDouble(), 4);
+    expect(refreshed['purchase_price'], 4000);
+    final invoice = (await AppDatabase.instance.invoices()).firstWhere((i) => i['id'] == invoiceId);
+    expect(invoice['total'], 12000);
+  });
+
+  test('receipt voucher is saved and creates a balanced journal entry', () async {
+    final marker = 'RECEIPT-${DateTime.now().microsecondsSinceEpoch}';
+    await AppDatabase.instance.saveContact(
+      name: marker, phone: '', address: '', kind: 'customer', openingBalance: 0,
+    );
+    final contact = (await AppDatabase.instance.contacts('customer')).firstWhere((c) => c['name'] == marker);
+    final voucherId = await AppDatabase.instance.createVoucher(
+      voucherType: 'receipt', voucherDate: '2026-10-15',
+      contactId: contact['id'] as int, amount: 7500, method: 'cash', note: 'اختبار',
+    );
+    final vouchers = await AppDatabase.instance.vouchers();
+    final voucher = vouchers.firstWhere((v) => v['id'] == voucherId);
+    expect(voucher['amount'], 7500);
+    expect(voucher['contact_name'], marker);
+    final db = await AppDatabase.instance.database;
+    final row = (await db.query('vouchers', where: 'id=?', whereArgs: [voucherId])).single;
+    expect(row['journal_entry_id'], isNotNull);
+    final entry = (await AppDatabase.instance.journalEntries()).firstWhere((e) => e['id'] == row['journal_entry_id']);
+    expect(entry['debit_total'], 7500);
+    expect(entry['credit_total'], 7500);
+  });
+
 }
