@@ -709,6 +709,70 @@ class _AccountingPageState extends State<AccountingPage> {
     amount.dispose();
   }
 
+  Future<void> showAccountLedger() async {
+    final accounts = await AppDatabase.instance.accounts();
+    if (!mounted || accounts.isEmpty) return;
+    String code = accounts.first['code'] as String;
+    final chosen = await showDialog<String>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, updateDialog) => AlertDialog(
+        title: const Text('كشف حركة حساب'),
+        content: DropdownButtonFormField<String>(
+          initialValue: code,
+          decoration: const InputDecoration(labelText: 'الحساب'),
+          items: accounts.map((a) => DropdownMenuItem<String>(
+            value: a['code'] as String,
+            child: Text('${a['code']} - ${a['name']}'),
+          )).toList(),
+          onChanged: (value) => updateDialog(() => code = value ?? code),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إلغاء')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, code), child: const Text('عرض الكشف')),
+        ],
+      )),
+    );
+    if (chosen == null || !mounted) return;
+    final account = accounts.firstWhere((a) => a['code'] == chosen);
+    final rows = await AppDatabase.instance.accountLedger(chosen);
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      builder: (ctx) {
+        var debit = 0;
+        var credit = 0;
+        for (final row in rows) {
+          debit += (row['debit'] as num).toInt();
+          credit += (row['credit'] as num).toInt();
+        }
+        return AlertDialog(
+          title: Text('كشف حساب ${account['name']}'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: rows.isEmpty
+              ? const Text('لا توجد حركات مرحّلة على هذا الحساب.')
+              : SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  ...rows.map((row) => ListTile(
+                    dense: true,
+                    title: Text(row['description'] as String),
+                    subtitle: Text('${row['entry_date']} • ${(row['reference'] as String).isEmpty ? 'بدون مرجع' : row['reference']}'),
+                    trailing: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.end, children: [
+                      Text('مدين ${money(row['debit'])}'),
+                      Text('دائن ${money(row['credit'])}'),
+                    ]),
+                  )),
+                  const Divider(),
+                  Text('إجمالي المدين: ${money(debit)} ر.ي'),
+                  Text('إجمالي الدائن: ${money(credit)} ر.ي'),
+                  Text('الرصيد الصافي: ${money((debit - credit).abs())} ${debit >= credit ? 'مدين' : 'دائن'} ر.ي'),
+                ])),
+          ),
+          actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إغلاق'))],
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) => FutureBuilder<List<Map<String, Object?>>>(
     key: ValueKey('accounts-$revision'),
@@ -727,6 +791,7 @@ class _AccountingPageState extends State<AccountingPage> {
           FilledButton.tonalIcon(onPressed: addInvoice, icon: const Icon(Icons.receipt_long), label: const Text('فاتورة')),
           OutlinedButton.icon(onPressed: addVoucher, icon: const Icon(Icons.payments_outlined), label: const Text('سند قبض/صرف')),
           OutlinedButton.icon(onPressed: addAccount, icon: const Icon(Icons.account_tree_outlined), label: const Text('إضافة حساب')),
+          OutlinedButton.icon(onPressed: showAccountLedger, icon: const Icon(Icons.menu_book_outlined), label: const Text('كشف حساب')),
         ]),
         const SizedBox(height: 20),
         const Text('دليل الحسابات', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: navy)),
@@ -772,6 +837,54 @@ class _AccountingPageState extends State<AccountingPage> {
                 ),
               ),
             ]);
+          },
+        ),
+        const SizedBox(height: 18),
+        const Text('القوائم المالية المختصرة', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: navy)),
+        FutureBuilder<Map<String, int>>(
+          key: ValueKey('financial-summary-$revision'),
+          future: AppDatabase.instance.financialSummary(),
+          builder: (context, snapshot) {
+            if (snapshot.hasError) return Text('تعذر إعداد الملخص المالي: ${snapshot.error}');
+            if (!snapshot.hasData) return const Padding(padding: EdgeInsets.all(12), child: LinearProgressIndicator());
+            final s = snapshot.data!;
+            final assets = s['assets'] ?? 0;
+            final liabilities = s['liabilities'] ?? 0;
+            final equity = s['equity'] ?? 0;
+            final revenue = s['revenue'] ?? 0;
+            final expenses = s['expenses'] ?? 0;
+            final net = s['net_profit'] ?? 0;
+            final rightSide = s['liabilities_and_equity'] ?? 0;
+            Widget reportRow(String label, int value, {bool emphasize = false}) => ListTile(
+              dense: true,
+              title: Text(label, style: TextStyle(fontWeight: emphasize ? FontWeight.bold : FontWeight.normal)),
+              trailing: Text('${money(value)} ر.ي', style: TextStyle(fontWeight: emphasize ? FontWeight.bold : FontWeight.normal)),
+            );
+            return Card(
+              elevation: 0,
+              color: Colors.white,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Column(children: [
+                  const ListTile(title: Text('قائمة الأرباح والخسائر', style: TextStyle(fontWeight: FontWeight.bold))),
+                  reportRow('الإيرادات', revenue),
+                  reportRow('المصروفات', expenses),
+                  reportRow(net >= 0 ? 'صافي الربح' : 'صافي الخسارة', net.abs(), emphasize: true),
+                  const Divider(),
+                  const ListTile(title: Text('ملخص المركز المالي', style: TextStyle(fontWeight: FontWeight.bold))),
+                  reportRow('الأصول', assets),
+                  reportRow('الالتزامات', liabilities),
+                  reportRow('حقوق الملكية المسجلة', equity),
+                  reportRow('الالتزامات وحقوق الملكية مع نتيجة الفترة', rightSide, emphasize: true),
+                  ListTile(
+                    leading: Icon((assets - rightSide).abs() < 1 ? Icons.check_circle : Icons.info_outline,
+                      color: (assets - rightSide).abs() < 1 ? Colors.green : Colors.orange),
+                    title: Text((assets - rightSide).abs() < 1 ? 'الجانبان متوازنان' : 'فرق ظاهر: ${money((assets - rightSide).abs())} ر.ي'),
+                    subtitle: const Text('قد يظهر فرق بسبب أرصدة افتتاحية الأطراف غير المرحّلة إلى دفتر الأستاذ. راجع الأرصدة قبل اعتماد القوائم.'),
+                  ),
+                ]),
+              ),
+            );
           },
         ),
         const SizedBox(height: 18),
@@ -838,7 +951,7 @@ class _AccountingPageState extends State<AccountingPage> {
           },
         ),
         const SizedBox(height: 12),
-        const Text('ملاحظة: هذا ميزان مراجعة للقيود المرحّلة فقط؛ لا يمثل بعدُ قوائم مالية نهائية، كما أن فواتير البيع والشراء والسندات لم تُربط بالترحيل في هذه المرحلة.', style: TextStyle(color: Colors.black54)),
+        const Text('تنبيه محاسبي: التقارير مبنية على القيود المرحّلة فقط. الأرصدة الافتتاحية للأطراف لا تُرحّل تلقائياً إلى دفتر الأستاذ، لذلك راجع التنبيه الظاهر في ملخص المركز المالي قبل الاعتماد.', style: TextStyle(color: Colors.black54)),
       ]);
     },
   );
