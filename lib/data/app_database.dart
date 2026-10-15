@@ -105,6 +105,11 @@ class AppDatabase {
           SELECT SUM(i.total) FROM invoices i
           WHERE i.contact_id=c.id
             AND i.invoice_type=CASE WHEN c.kind='customer' THEN 'sale' ELSE 'purchase' END
+        ),0) - COALESCE((
+          SELECT SUM(r.amount) FROM returns r
+          JOIN invoices ri ON ri.id=r.invoice_id
+          WHERE ri.contact_id=c.id
+            AND r.return_type=CASE WHEN c.kind='customer' THEN 'sale_return' ELSE 'purchase_return' END
         ),0) AS transaction_total,
         COALESCE((
           SELECT SUM(v.amount) FROM vouchers v
@@ -115,6 +120,82 @@ class AppDatabase {
       WHERE c.kind=?
       ORDER BY c.name COLLATE NOCASE
     ''', [kind]);
+  }
+
+  Future<List<Map<String, Object?>>> contactStatement(int contactId) async {
+    final db = await database;
+    final contactRows = await db.query('contacts', where: 'id=?', whereArgs: [contactId], limit: 1);
+    if (contactRows.isEmpty) throw ArgumentError('الطرف غير موجود');
+    final contact = contactRows.first;
+    final kind = contact['kind'] as String;
+    final opening = (contact['opening_balance'] as num).toInt();
+    final events = <Map<String, Object?>>[];
+    if (opening != 0) {
+      events.add({
+        'date': (contact['created_at'] as String).substring(0, 10),
+        'description': 'الرصيد الافتتاحي',
+        'reference': '',
+        'debit': kind == 'customer' ? opening : 0,
+        'credit': kind == 'supplier' ? opening : 0,
+        'sort_order': 0,
+      });
+    }
+    final invoices = await db.query('invoices',
+      where: 'contact_id=? AND invoice_type=?',
+      whereArgs: [contactId, kind == 'customer' ? 'sale' : 'purchase']);
+    for (final invoice in invoices) {
+      final amount = (invoice['total'] as num).toInt();
+      events.add({
+        'date': invoice['invoice_date'], 'description': kind == 'customer' ? 'فاتورة مبيعات' : 'فاتورة مشتريات',
+        'reference': invoice['invoice_number'],
+        'debit': kind == 'customer' ? amount : 0,
+        'credit': kind == 'supplier' ? amount : 0,
+        'sort_order': 1,
+      });
+    }
+    final vouchers = await db.query('vouchers', where: 'contact_id=?', whereArgs: [contactId]);
+    for (final voucher in vouchers) {
+      final amount = (voucher['amount'] as num).toInt();
+      final isReceipt = voucher['voucher_type'] == 'receipt';
+      events.add({
+        'date': voucher['voucher_date'],
+        'description': isReceipt ? 'سند قبض' : 'سند صرف',
+        'reference': '${isReceipt ? 'R' : 'P'}-${voucher['id']}',
+        'debit': kind == 'supplier' && !isReceipt ? amount : 0,
+        'credit': kind == 'customer' && isReceipt ? amount : 0,
+        'sort_order': 2,
+      });
+    }
+    final returns = await db.rawQuery('''
+      SELECT r.id, r.return_type, r.return_date, r.amount
+      FROM returns r JOIN invoices i ON i.id=r.invoice_id
+      WHERE i.contact_id=?
+    ''', [contactId]);
+    for (final item in returns) {
+      final isSaleReturn = item['return_type'] == 'sale_return';
+      final amount = (item['amount'] as num).toInt();
+      events.add({
+        'date': item['return_date'],
+        'description': isSaleReturn ? 'مرتجع مبيعات' : 'مرتجع مشتريات',
+        'reference': 'RET-${item['id']}',
+        'debit': kind == 'supplier' && !isSaleReturn ? amount : 0,
+        'credit': kind == 'customer' && isSaleReturn ? amount : 0,
+        'sort_order': 3,
+      });
+    }
+    events.sort((a, b) {
+      final dateCompare = (a['date'] as String).compareTo(b['date'] as String);
+      if (dateCompare != 0) return dateCompare;
+      return (a['sort_order'] as int).compareTo(b['sort_order'] as int);
+    });
+    var running = 0;
+    for (final event in events) {
+      final debit = (event['debit'] as num).toInt();
+      final credit = (event['credit'] as num).toInt();
+      running += kind == 'customer' ? debit - credit : credit - debit;
+      event['balance'] = running;
+    }
+    return events;
   }
 
   Future<void> saveContact({int? id, required String name, required String phone, required String address, required String kind, required int openingBalance}) async {
