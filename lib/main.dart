@@ -301,7 +301,7 @@ class _ContactsPageState extends State<ContactsPage> {
                           widget.onChanged();
                         } catch (e) {
                           if (!mounted) return;
-                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تعذر حذف الطرف المرتبط بحركات: $e')));
+                          messenger.showSnackBar(SnackBar(content: Text('تعذر حذف الطرف المرتبط بحركات: $e')));
                         }
                       }
                     },
