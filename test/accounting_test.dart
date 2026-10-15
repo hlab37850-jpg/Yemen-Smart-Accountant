@@ -58,7 +58,6 @@ void main() {
     final entries = await AppDatabase.instance.journalEntries();
     expect(entries.any((e) => e['description'] == marker), isFalse);
   });
-}
 
   test('sales invoice posts accounting entries and reduces stock atomically', () async {
     final marker = 'INV-${DateTime.now().microsecondsSinceEpoch}';
@@ -121,3 +120,4 @@ void main() {
     final refreshed = (await AppDatabase.instance.products()).firstWhere((p) => p['id'] == product['id']);
     expect((refreshed['quantity'] as num).toDouble(), 1);
   });
+}
