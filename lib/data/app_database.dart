@@ -10,18 +10,20 @@ class AppDatabase {
     if (_db != null) return _db!;
     _db = await openDatabase(
       p.join(await getDatabasesPath(), 'yemen_smart_accountant.db'),
-      version: 2,
+      version: 3,
       onConfigure: (db) async { await db.execute('PRAGMA foreign_keys = ON'); },
       onCreate: (db, version) async {
         await _createBaseSchema(db);
         await _createAccountingSchema(db);
         await _seedAccounts(db);
+        await _createInvoiceSchema(db);
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
           await _createAccountingSchema(db);
           await _seedAccounts(db);
         }
+        if (oldVersion < 3) await _createInvoiceSchema(db);
       },
     );
     return _db!;
@@ -62,6 +64,13 @@ class AppDatabase {
     for (final account in defaults) {
       await db.insert('accounts', account, conflictAlgorithm: ConflictAlgorithm.ignore);
     }
+  }
+
+  Future<void> _createInvoiceSchema(DatabaseExecutor db) async {
+    await db.execute("CREATE TABLE IF NOT EXISTS invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, invoice_type TEXT NOT NULL CHECK(invoice_type IN ('sale','purchase')), invoice_number TEXT NOT NULL UNIQUE, invoice_date TEXT NOT NULL, contact_id INTEGER NOT NULL REFERENCES contacts(id), subtotal INTEGER NOT NULL CHECK(subtotal>=0), discount INTEGER NOT NULL DEFAULT 0 CHECK(discount>=0), total INTEGER NOT NULL CHECK(total>0), journal_entry_id INTEGER REFERENCES journal_entries(id), created_at TEXT NOT NULL)");
+    await db.execute("CREATE TABLE IF NOT EXISTS invoice_lines (id INTEGER PRIMARY KEY AUTOINCREMENT, invoice_id INTEGER NOT NULL REFERENCES invoices(id) ON DELETE CASCADE, product_id INTEGER NOT NULL REFERENCES products(id), quantity REAL NOT NULL CHECK(quantity>0), unit_price INTEGER NOT NULL CHECK(unit_price>=0), unit_cost INTEGER NOT NULL CHECK(unit_cost>=0), line_total INTEGER NOT NULL CHECK(line_total>=0), cost_total INTEGER NOT NULL CHECK(cost_total>=0))");
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_invoices_date ON invoices(invoice_date)');
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_invoice_lines_invoice ON invoice_lines(invoice_id)');
   }
 
   String get _now => DateTime.now().toIso8601String();
@@ -176,6 +185,169 @@ class AppDatabase {
       FROM journal_entries e LEFT JOIN journal_lines l ON l.entry_id=e.id
       GROUP BY e.id ORDER BY e.entry_date DESC, e.id DESC
     ''');
+  }
+
+  Future<int> createInvoice({
+    required String invoiceType,
+    required String invoiceDate,
+    required int contactId,
+    required List<Map<String, Object>> lines,
+    int discount = 0,
+  }) async {
+    if (invoiceType != 'sale' && invoiceType != 'purchase') throw ArgumentError('نوع الفاتورة غير صالح');
+    if (lines.isEmpty) throw ArgumentError('أضف صنفاً واحداً على الأقل');
+    if (discount < 0) throw ArgumentError('الخصم لا يمكن أن يكون سالباً');
+    final db = await database;
+    return db.transaction<int>((txn) async {
+      final expectedKind = invoiceType == 'sale' ? 'customer' : 'supplier';
+      final contact = await txn.query('contacts', where: 'id=? AND kind=?', whereArgs: [contactId, expectedKind], limit: 1);
+      if (contact.isEmpty) throw ArgumentError(invoiceType == 'sale' ? 'اختر عميلاً صحيحاً' : 'اختر مورداً صحيحاً');
+      var subtotal = 0;
+      var costTotal = 0;
+      final prepared = <Map<String, Object>>[];
+      for (final line in lines) {
+        final productId = line['product_id'] as int;
+        final quantity = (line['quantity'] as num).toDouble();
+        final unitPrice = line['unit_price'] as int;
+        if (quantity <= 0 || unitPrice < 0) throw ArgumentError('الكمية والسعر غير صالحين');
+        final productRows = await txn.query('products', where: 'id=?', whereArgs: [productId], limit: 1);
+        if (productRows.isEmpty) throw ArgumentError('الصنف غير موجود');
+        final product = productRows.first;
+        final stock = (product['quantity'] as num).toDouble();
+        final unitCost = invoiceType == 'purchase' ? unitPrice : (product['purchase_price'] as int);
+        if (invoiceType == 'sale' && stock < quantity) {
+          throw ArgumentError('الكمية المتوفرة من ${product['name']} غير كافية');
+        }
+        final lineTotal = (quantity * unitPrice).round();
+        final lineCost = (quantity * unitCost).round();
+        subtotal += lineTotal;
+        costTotal += lineCost;
+        prepared.add({
+          'product_id': productId, 'quantity': quantity, 'unit_price': unitPrice,
+          'unit_cost': unitCost, 'line_total': lineTotal, 'cost_total': lineCost,
+          'product_name': product['name'] as String,
+          'old_quantity': stock,
+        });
+      }
+      if (discount > subtotal) throw ArgumentError('الخصم أكبر من إجمالي الفاتورة');
+      final total = subtotal - discount;
+      if (total <= 0) throw ArgumentError('إجمالي الفاتورة يجب أن يكون أكبر من صفر');
+      final invoiceNumber = (invoiceType == 'sale' ? 'S-' : 'P-') +
+          DateTime.now().microsecondsSinceEpoch.toString();
+      final invoiceId = await txn.insert('invoices', {
+        'invoice_type': invoiceType, 'invoice_number': invoiceNumber,
+        'invoice_date': invoiceDate, 'contact_id': contactId,
+        'subtotal': subtotal, 'discount': discount, 'total': total,
+        'created_at': _now,
+      });
+      for (final line in prepared) {
+        await txn.insert('invoice_lines', {
+          'invoice_id': invoiceId, 'product_id': line['product_id'],
+          'quantity': line['quantity'], 'unit_price': line['unit_price'],
+          'unit_cost': line['unit_cost'], 'line_total': line['line_total'],
+          'cost_total': line['cost_total'],
+        });
+        final oldQuantity = line['old_quantity'] as double;
+        final quantity = line['quantity'] as double;
+        final newQuantity = invoiceType == 'sale' ? oldQuantity - quantity : oldQuantity + quantity;
+        final updateValues = <String, Object>{'quantity': newQuantity};
+        if (invoiceType == 'purchase') updateValues['purchase_price'] = line['unit_price'] as int;
+        await txn.update('products', updateValues, where: 'id=?', whereArgs: [line['product_id']]);
+        await txn.insert('stock_movements', {
+          'product_id': line['product_id'],
+          'movement_date': invoiceDate,
+          'movement_type': invoiceType == 'sale' ? 'sale' : 'purchase',
+          'quantity': invoiceType == 'sale' ? -quantity : quantity,
+          'note': 'فاتورة $invoiceNumber',
+        });
+      }
+      final mainLines = invoiceType == 'sale'
+          ? [
+              {'account_code': '1100', 'debit': total, 'credit': 0},
+              {'account_code': '4000', 'debit': 0, 'credit': total},
+            ]
+          : [
+              {'account_code': '1200', 'debit': total, 'credit': 0},
+              {'account_code': '2000', 'debit': 0, 'credit': total},
+            ];
+      final entryId = await _insertPostedEntry(
+        txn,
+        description: (invoiceType == 'sale' ? 'فاتورة مبيعات ' : 'فاتورة مشتريات ') + invoiceNumber,
+        entryDate: invoiceDate,
+        reference: invoiceNumber,
+        lines: mainLines,
+      );
+      if (invoiceType == 'sale' && costTotal > 0) {
+        await _insertPostedEntry(
+          txn,
+          description: 'تكلفة بضاعة الفاتورة $invoiceNumber',
+          entryDate: invoiceDate,
+          reference: invoiceNumber,
+          lines: [
+            {'account_code': '5000', 'debit': costTotal, 'credit': 0},
+            {'account_code': '1200', 'debit': 0, 'credit': costTotal},
+          ],
+        );
+      }
+      await txn.update('invoices', {'journal_entry_id': entryId}, where: 'id=?', whereArgs: [invoiceId]);
+      return invoiceId;
+    });
+  }
+
+  Future<int> _insertPostedEntry(
+    Transaction txn, {
+    required String description,
+    required String entryDate,
+    required String reference,
+    required List<Map<String, Object>> lines,
+  }) async {
+    var debitTotal = 0;
+    var creditTotal = 0;
+    final resolved = <Map<String, Object>>[];
+    for (final line in lines) {
+      final code = line['account_code'] as String;
+      final debit = line['debit'] as int;
+      final credit = line['credit'] as int;
+      if ((debit > 0 && credit > 0) || debit < 0 || credit < 0) {
+        throw ArgumentError('سطر قيد غير صالح');
+      }
+      final accountsFound = await txn.query('accounts', columns: ['name'], where: 'code=? AND active=1', whereArgs: [code], limit: 1);
+      if (accountsFound.isEmpty) throw ArgumentError('الحساب غير موجود: ' + code);
+      debitTotal += debit;
+      creditTotal += credit;
+      resolved.add({
+        'account_code': code, 'account_name': accountsFound.first['name'] as String,
+        'debit': debit, 'credit': credit,
+      });
+    }
+    if (debitTotal <= 0 || debitTotal != creditTotal) throw ArgumentError('القيد المحاسبي غير متوازن');
+    final entryId = await txn.insert('journal_entries', {
+      'entry_date': entryDate, 'description': description, 'reference': reference,
+      'posted': 1, 'created_at': _now,
+    });
+    for (final line in resolved) {
+      await txn.insert('journal_lines', {...line, 'entry_id': entryId});
+    }
+    return entryId;
+  }
+
+  Future<List<Map<String, Object?>>> invoices() async {
+    final db = await database;
+    return db.rawQuery('''
+      SELECT i.id, i.invoice_type, i.invoice_number, i.invoice_date, i.subtotal,
+        i.discount, i.total, c.name AS contact_name
+      FROM invoices i JOIN contacts c ON c.id=i.contact_id
+      ORDER BY i.invoice_date DESC, i.id DESC
+    ''');
+  }
+
+  Future<List<Map<String, Object?>>> invoiceLines(int invoiceId) async {
+    final db = await database;
+    return db.rawQuery('''
+      SELECT il.*, p.name AS product_name, p.unit AS unit_name
+      FROM invoice_lines il JOIN products p ON p.id=il.product_id
+      WHERE il.invoice_id=? ORDER BY il.id
+    ''', [invoiceId]);
   }
 
   Future<List<Map<String, Object?>>> trialBalance() async {
