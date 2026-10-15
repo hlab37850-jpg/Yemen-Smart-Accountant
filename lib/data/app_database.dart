@@ -50,7 +50,7 @@ class AppDatabase {
     }
   }
 
-  Future<void> deleteContact(int id) async => (await database).delete('contacts', where: 'id=?', whereArgs: [id]);
+  Future<void> deleteContact(int id) async { await (await database).delete('contacts', where: 'id=?', whereArgs: [id]); }
   Future<List<Map<String, Object?>>> products() async => (await database).query('products', orderBy: 'name COLLATE NOCASE');
 
   Future<void> saveProduct({int? id, required String name, required String sku, required String unit, required int purchasePrice, required int salePrice, required double quantity}) async {
@@ -63,12 +63,13 @@ class AppDatabase {
     }
   }
 
-  Future<void> deleteProduct(int id) async => (await database).delete('products', where: 'id=?', whereArgs: [id]);
+  Future<void> deleteProduct(int id) async { await (await database).delete('products', where: 'id=?', whereArgs: [id]); }
   Future<Map<String, Object?>?> company() async {
     final rows = await (await database).query('company_settings', where: 'id=1', limit: 1);
     return rows.isEmpty ? null : rows.first;
   }
 
-  Future<void> saveCompany({required String name, required String phone, required String address, required String currency}) async =>
-      (await database).insert('company_settings', {'id': 1, 'name': name.trim(), 'phone': phone.trim(), 'address': address.trim(), 'currency': currency}, conflictAlgorithm: ConflictAlgorithm.replace);
+  Future<void> saveCompany({required String name, required String phone, required String address, required String currency}) async {
+    await (await database).insert('company_settings', {'id': 1, 'name': name.trim(), 'phone': phone.trim(), 'address': address.trim(), 'currency': currency}, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
 }
