@@ -523,6 +523,108 @@ class _AccountingPageState extends State<AccountingPage> {
     discount.dispose();
   }
 
+  Future<void> addVoucher() async {
+    final customers = await AppDatabase.instance.contacts('customer');
+    final suppliers = await AppDatabase.instance.contacts('supplier');
+    if (!mounted) return;
+    if (customers.isEmpty && suppliers.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('أضف عميلاً أو مورداً أولاً')));
+      return;
+    }
+    String type = customers.isNotEmpty ? 'receipt' : 'payment';
+    int? contactId = (type == 'receipt' ? customers : suppliers).first['id'] as int;
+    String method = 'cash';
+    final amount = TextEditingController();
+    final note = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, updateDialog) {
+        final available = type == 'receipt' ? customers : suppliers;
+        if (contactId != null && !available.any((c) => c['id'] == contactId)) {
+          contactId = available.isEmpty ? null : available.first['id'] as int;
+        }
+        return AlertDialog(
+          title: const Text('سند قبض / صرف'),
+          content: Form(key: formKey, child: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
+            DropdownButtonFormField<String>(
+              initialValue: type,
+              decoration: const InputDecoration(labelText: 'نوع السند'),
+              items: const [
+                DropdownMenuItem(value: 'receipt', child: Text('قبض من عميل')),
+                DropdownMenuItem(value: 'payment', child: Text('صرف لمورد')),
+              ],
+              onChanged: (v) => updateDialog(() {
+                type = v ?? type;
+                final list = type == 'receipt' ? customers : suppliers;
+                contactId = list.isEmpty ? null : list.first['id'] as int;
+              }),
+            ),
+            const SizedBox(height: 8),
+            DropdownButtonFormField<int>(
+              initialValue: contactId,
+              decoration: InputDecoration(labelText: type == 'receipt' ? 'العميل' : 'المورد'),
+              items: available.map((c) => DropdownMenuItem<int>(value: c['id'] as int, child: Text(c['name'] as String))).toList(),
+              onChanged: available.isEmpty ? null : (v) => updateDialog(() => contactId = v),
+            ),
+            if (available.isEmpty) Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(type == 'receipt' ? 'لا يوجد عملاء مسجلون' : 'لا يوجد موردون مسجلون', style: const TextStyle(color: Colors.redAccent)),
+            ),
+            const SizedBox(height: 8),
+            TextFormField(controller: amount, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'المبلغ (ر.ي) *'), validator: (v) {
+              final value = double.tryParse((v ?? '').replaceAll(',', '').trim());
+              return value == null || value <= 0 ? 'أدخل مبلغاً أكبر من صفر' : null;
+            }),
+            const SizedBox(height: 8),
+            DropdownButtonFormField<String>(
+              initialValue: method,
+              decoration: const InputDecoration(labelText: 'طريقة السداد'),
+              items: const [
+                DropdownMenuItem(value: 'cash', child: Text('نقداً / الصندوق')),
+                DropdownMenuItem(value: 'bank', child: Text('تحويل / البنك')),
+              ],
+              onChanged: (v) => updateDialog(() => method = v ?? 'cash'),
+            ),
+            const SizedBox(height: 8),
+            TextField(controller: note, decoration: const InputDecoration(labelText: 'البيان')),
+          ]))),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('إلغاء')),
+            FilledButton(onPressed: () {
+              if (!formKey.currentState!.validate()) return;
+              if (contactId == null) {
+                ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('اختر الطرف المطلوب')));
+                return;
+              }
+              Navigator.pop(ctx, true);
+            }, child: const Text('حفظ وترحيل')),
+          ],
+        );
+      }),
+    );
+    if (saved == true && mounted) {
+      final messenger = ScaffoldMessenger.of(context);
+      try {
+        await AppDatabase.instance.createVoucher(
+          voucherType: type,
+          voucherDate: DateTime.now().toIso8601String().substring(0, 10),
+          contactId: contactId!,
+          amount: (double.parse(amount.text.replaceAll(',', '').trim()) * 100).round(),
+          method: method,
+          note: note.text,
+        );
+        if (!mounted) return;
+        messenger.showSnackBar(const SnackBar(content: Text('تم حفظ السند وترحيله محاسبياً')));
+        reload();
+      } catch (e) {
+        if (mounted) messenger.showSnackBar(SnackBar(content: Text('لم يُحفظ السند: $e')));
+      }
+    }
+    amount.dispose();
+    note.dispose();
+  }
+
   Future<void> addJournalEntry() async {
     final accounts = await AppDatabase.instance.accounts();
     if (!mounted) return;
@@ -620,6 +722,7 @@ class _AccountingPageState extends State<AccountingPage> {
         Wrap(spacing: 8, runSpacing: 8, children: [
           FilledButton.icon(onPressed: addJournalEntry, icon: const Icon(Icons.add_chart), label: const Text('قيد يومية')),
           FilledButton.tonalIcon(onPressed: addInvoice, icon: const Icon(Icons.receipt_long), label: const Text('فاتورة')),
+          OutlinedButton.icon(onPressed: addVoucher, icon: const Icon(Icons.payments_outlined), label: const Text('سند قبض/صرف')),
           OutlinedButton.icon(onPressed: addAccount, icon: const Icon(Icons.account_tree_outlined), label: const Text('إضافة حساب')),
         ]),
         const SizedBox(height: 20),
@@ -685,6 +788,27 @@ class _AccountingPageState extends State<AccountingPage> {
                 title: Text('${r['invoice_type'] == 'sale' ? 'مبيعات' : 'مشتريات'} • ${r['invoice_number']}'),
                 subtitle: Text('${r['contact_name']} • ${r['invoice_date']}'),
                 trailing: Text('${money(r['total'])} ر.ي', style: const TextStyle(fontWeight: FontWeight.bold)),
+              ),
+            )).toList());
+          },
+        ),
+        const SizedBox(height: 18),
+        const Text('سندات القبض والصرف', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: navy)),
+        FutureBuilder<List<Map<String, Object?>>>(
+          key: ValueKey('vouchers-$revision'),
+          future: AppDatabase.instance.vouchers(),
+          builder: (context, snapshot) {
+            if (snapshot.hasError) return Text('تعذر تحميل السندات: ${snapshot.error}');
+            if (!snapshot.hasData) return const Padding(padding: EdgeInsets.all(12), child: LinearProgressIndicator());
+            final rows = snapshot.data!;
+            if (rows.isEmpty) return const Card(elevation: 0, child: Padding(padding: EdgeInsets.all(16), child: Text('لا توجد سندات مسجلة بعد.')));
+            return Column(children: rows.map((v) => Card(
+              elevation: 0, color: Colors.white,
+              child: ListTile(
+                leading: Icon(v['voucher_type'] == 'receipt' ? Icons.call_received : Icons.call_made, color: blue),
+                title: Text('${v['voucher_type'] == 'receipt' ? 'سند قبض' : 'سند صرف'} • ${v['contact_name'] ?? 'بدون طرف'}'),
+                subtitle: Text('${v['voucher_date']} • ${v['method'] == 'bank' ? 'البنك' : 'الصندوق'}${(v['note'] as String).isEmpty ? '' : ' • ${v['note']}'}'),
+                trailing: Text('${money(v['amount'])} ر.ي', style: const TextStyle(fontWeight: FontWeight.bold)),
               ),
             )).toList());
           },
