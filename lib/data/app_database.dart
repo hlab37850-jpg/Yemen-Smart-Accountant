@@ -433,4 +433,64 @@ class AppDatabase {
       ORDER BY a.code
     ''');
   }
+
+  Future<List<Map<String, Object?>>> accountLedger(String accountCode) async {
+    final db = await database;
+    return db.rawQuery('''
+      SELECT e.id AS entry_id, e.entry_date, e.description, e.reference,
+        l.debit, l.credit, l.account_name
+      FROM journal_lines l
+      JOIN journal_entries e ON e.id=l.entry_id
+      WHERE l.account_code=? AND e.posted=1
+      ORDER BY e.entry_date, e.id, l.id
+    ''', [accountCode]);
+  }
+
+  Future<Map<String, int>> financialSummary() async {
+    final db = await database;
+    final rows = await db.rawQuery('''
+      SELECT a.type,
+        COALESCE(SUM(l.debit),0) AS debits,
+        COALESCE(SUM(l.credit),0) AS credits
+      FROM accounts a
+      LEFT JOIN journal_lines l ON l.account_code=a.code
+      LEFT JOIN journal_entries e ON e.id=l.entry_id AND e.posted=1
+      WHERE a.active=1
+      GROUP BY a.type
+    ''');
+    final totals = <String, int>{'assets':0,'liabilities':0,'equity':0,'revenue':0,'expenses':0};
+    for (final row in rows) {
+      final type = row['type'] as String;
+      final debit = (row['debits'] as num).toInt();
+      final credit = (row['credits'] as num).toInt();
+      switch (type) {
+        case 'asset': totals['assets'] = (totals['assets'] ?? 0) + debit - credit; break;
+        case 'liability': totals['liabilities'] = (totals['liabilities'] ?? 0) + credit - debit; break;
+        case 'equity': totals['equity'] = (totals['equity'] ?? 0) + credit - debit; break;
+        case 'revenue': totals['revenue'] = (totals['revenue'] ?? 0) + credit - debit; break;
+        case 'expense': totals['expenses'] = (totals['expenses'] ?? 0) + debit - credit; break;
+      }
+    }
+    totals['net_profit'] = (totals['revenue'] ?? 0) - (totals['expenses'] ?? 0);
+    totals['liabilities_and_equity'] = (totals['liabilities'] ?? 0) + (totals['equity'] ?? 0) + (totals['net_profit'] ?? 0);
+    return totals;
+  }
+
+  Future<List<Map<String, Object?>>> stockMovements({int? productId}) async {
+    final db = await database;
+    if (productId == null) {
+      return db.rawQuery('''
+        SELECT m.*, p.name AS product_name, p.unit AS unit_name
+        FROM stock_movements m JOIN products p ON p.id=m.product_id
+        ORDER BY m.movement_date DESC, m.id DESC
+      ''');
+    }
+    return db.rawQuery('''
+      SELECT m.*, p.name AS product_name, p.unit AS unit_name
+      FROM stock_movements m JOIN products p ON p.id=m.product_id
+      WHERE m.product_id=?
+      ORDER BY m.movement_date DESC, m.id DESC
+    ''', [productId]);
+  }
+
 }
