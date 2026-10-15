@@ -417,9 +417,11 @@ class _AccountingPageState extends State<AccountingPage> {
     }
     String invoiceType = customers.isNotEmpty ? 'sale' : 'purchase';
     int? contactId = (invoiceType == 'sale' ? customers : suppliers).first['id'] as int;
-    int? productId = products.first['id'] as int;
-    final quantity = TextEditingController(text: '1');
-    final price = TextEditingController(text: (((invoiceType == 'sale' ? products.first['sale_price'] : products.first['purchase_price']) as int) / 100).toStringAsFixed(2));
+    final productIds = <int?>[products.first['id'] as int];
+    final quantities = <TextEditingController>[TextEditingController(text: '1')];
+    final prices = <TextEditingController>[
+      TextEditingController(text: (((invoiceType == 'sale' ? products.first['sale_price'] : products.first['purchase_price']) as int) / 100).toStringAsFixed(2))
+    ];
     final discount = TextEditingController(text: '0');
     final formKey = GlobalKey<FormState>();
     final saved = await showDialog<bool>(
@@ -430,7 +432,7 @@ class _AccountingPageState extends State<AccountingPage> {
           contactId = availableContacts.isEmpty ? null : availableContacts.first['id'] as int;
         }
         return AlertDialog(
-          title: const Text('فاتورة جديدة'),
+          title: const Text('فاتورة جديدة متعددة الأصناف'),
           content: Form(key: formKey, child: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
             DropdownButtonFormField<String>(
               initialValue: invoiceType,
@@ -443,14 +445,17 @@ class _AccountingPageState extends State<AccountingPage> {
                 invoiceType = v ?? invoiceType;
                 final list = invoiceType == 'sale' ? customers : suppliers;
                 contactId = list.isEmpty ? null : list.first['id'] as int;
-                final product = products.firstWhere((p) => p['id'] == productId, orElse: () => products.first);
-                price.text = ((((invoiceType == 'sale' ? product['sale_price'] : product['purchase_price']) as int) / 100).toStringAsFixed(2));
+                for (var i = 0; i < productIds.length; i++) {
+                  final product = products.firstWhere((p) => p['id'] == productIds[i], orElse: () => products.first);
+                  prices[i].text = (((invoiceType == 'sale' ? product['sale_price'] : product['purchase_price']) as int) / 100).toStringAsFixed(2);
+                }
               }),
             ),
             const SizedBox(height: 8),
             DropdownButtonFormField<int>(
               key: ValueKey('invoice-contact-$invoiceType'),
               initialValue: contactId,
+              isExpanded: true,
               decoration: InputDecoration(labelText: invoiceType == 'sale' ? 'العميل' : 'المورد'),
               items: availableContacts.map((c) => DropdownMenuItem<int>(value: c['id'] as int, child: Text(c['name'] as String))).toList(),
               onChanged: availableContacts.isEmpty ? null : (v) => updateDialog(() => contactId = v),
@@ -459,39 +464,87 @@ class _AccountingPageState extends State<AccountingPage> {
               padding: const EdgeInsets.only(top: 6),
               child: Text(invoiceType == 'sale' ? 'لا يوجد عملاء مسجلون' : 'لا يوجد موردون مسجلون', style: const TextStyle(color: Colors.redAccent)),
             ),
-            const SizedBox(height: 8),
-            DropdownButtonFormField<int>(
-              initialValue: productId,
-              decoration: const InputDecoration(labelText: 'الصنف'),
-              items: products.map((p) => DropdownMenuItem<int>(value: p['id'] as int, child: Text(p['name'] as String))).toList(),
-              onChanged: (v) => updateDialog(() {
-                productId = v;
-                final product = products.firstWhere((p) => p['id'] == v, orElse: () => products.first);
-                price.text = ((((invoiceType == 'sale' ? product['sale_price'] : product['purchase_price']) as int) / 100).toStringAsFixed(2));
+            const SizedBox(height: 12),
+            const Align(alignment: Alignment.centerRight, child: Text('أصناف الفاتورة', style: TextStyle(fontWeight: FontWeight.bold))),
+            ...List.generate(productIds.length, (i) => Card(
+              elevation: 0,
+              color: const Color(0xFFF6F8FC),
+              child: Padding(padding: const EdgeInsets.all(10), child: Column(children: [
+                Row(children: [
+                  Expanded(child: Text('الصنف ${i + 1}', style: const TextStyle(fontWeight: FontWeight.bold))),
+                  if (productIds.length > 1) IconButton(
+                    tooltip: 'حذف الصنف من الفاتورة',
+                    onPressed: () => updateDialog(() {
+                      productIds.removeAt(i);
+                      quantities.removeAt(i).dispose();
+                      prices.removeAt(i).dispose();
+                    }),
+                    icon: const Icon(Icons.remove_circle_outline, color: Colors.redAccent),
+                  ),
+                ]),
+                DropdownButtonFormField<int>(
+                  key: ValueKey('invoice-product-$i-${productIds[i]}'),
+                  initialValue: productIds[i],
+                  isExpanded: true,
+                  decoration: const InputDecoration(labelText: 'الصنف'),
+                  items: products.map((p) => DropdownMenuItem<int>(value: p['id'] as int, child: Text(p['name'] as String))).toList(),
+                  onChanged: (v) => updateDialog(() {
+                    productIds[i] = v;
+                    final product = products.firstWhere((p) => p['id'] == v, orElse: () => products.first);
+                    prices[i].text = (((invoiceType == 'sale' ? product['sale_price'] : product['purchase_price']) as int) / 100).toStringAsFixed(2);
+                  }),
+                ),
+                const SizedBox(height: 8),
+                Row(children: [
+                  Expanded(child: TextFormField(
+                    controller: quantities[i],
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    decoration: const InputDecoration(labelText: 'الكمية *'),
+                    validator: (v) {
+                      final q = double.tryParse((v ?? '').trim());
+                      return q == null || q <= 0 ? 'كمية غير صالحة' : null;
+                    },
+                  )),
+                  const SizedBox(width: 10),
+                  Expanded(child: TextFormField(
+                    controller: prices[i],
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    decoration: const InputDecoration(labelText: 'سعر الوحدة *'),
+                    validator: (v) {
+                      final p = double.tryParse((v ?? '').replaceAll(',', '').trim());
+                      return p == null || p <= 0 ? 'سعر غير صالح' : null;
+                    },
+                  )),
+                ]),
+              ])),
+            )),
+            Align(alignment: Alignment.centerRight, child: TextButton.icon(
+              onPressed: () => updateDialog(() {
+                productIds.add(products.first['id'] as int);
+                quantities.add(TextEditingController(text: '1'));
+                final p = products.first;
+                prices.add(TextEditingController(text: (((invoiceType == 'sale' ? p['sale_price'] : p['purchase_price']) as int) / 100).toStringAsFixed(2)));
               }),
+              icon: const Icon(Icons.add),
+              label: const Text('إضافة صنف آخر'),
+            )),
+            const SizedBox(height: 8),
+            TextFormField(
+              controller: discount,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              decoration: const InputDecoration(labelText: 'الخصم الإجمالي (ر.ي)'),
+              validator: (v) {
+                final d = double.tryParse((v ?? '').replaceAll(',', '').trim());
+                return d == null || d < 0 ? 'أدخل خصماً صحيحاً' : null;
+              },
             ),
-            const SizedBox(height: 8),
-            TextFormField(controller: quantity, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'الكمية *'), validator: (v) {
-              final q = double.tryParse((v ?? '').trim());
-              return q == null || q <= 0 ? 'أدخل كمية أكبر من صفر' : null;
-            }),
-            const SizedBox(height: 8),
-            TextFormField(controller: price, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'سعر الوحدة (ر.ي) *'), validator: (v) {
-              final p = double.tryParse((v ?? '').replaceAll(',', '').trim());
-              return p == null || p <= 0 ? 'أدخل سعراً أكبر من صفر' : null;
-            }),
-            const SizedBox(height: 8),
-            TextFormField(controller: discount, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'الخصم (ر.ي)'), validator: (v) {
-              final d = double.tryParse((v ?? '').replaceAll(',', '').trim());
-              return d == null || d < 0 ? 'أدخل خصماً صحيحاً' : null;
-            }),
           ]))),
           actions: [
             TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('إلغاء')),
             FilledButton(onPressed: () {
               if (!formKey.currentState!.validate()) return;
-              if (contactId == null || productId == null) {
-                ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('يلزم اختيار طرف وصنف')));
+              if (contactId == null || productIds.any((id) => id == null)) {
+                ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('يلزم اختيار طرف وجميع الأصناف')));
                 return;
               }
               Navigator.pop(ctx, true);
@@ -503,16 +556,20 @@ class _AccountingPageState extends State<AccountingPage> {
     if (saved == true && mounted) {
       final messenger = ScaffoldMessenger.of(context);
       try {
+        final lines = <Map<String, Object>>[];
+        for (var i = 0; i < productIds.length; i++) {
+          lines.add({
+            'product_id': productIds[i]!,
+            'quantity': double.parse(quantities[i].text.trim()),
+            'unit_price': (double.parse(prices[i].text.replaceAll(',', '').trim()) * 100).round(),
+          });
+        }
         await AppDatabase.instance.createInvoice(
           invoiceType: invoiceType,
           invoiceDate: DateTime.now().toIso8601String().substring(0, 10),
           contactId: contactId!,
           discount: (double.parse(discount.text.replaceAll(',', '').trim()) * 100).round(),
-          lines: [{
-            'product_id': productId!,
-            'quantity': double.parse(quantity.text.trim()),
-            'unit_price': (double.parse(price.text.replaceAll(',', '').trim()) * 100).round(),
-          }],
+          lines: lines,
         );
         if (!mounted) return;
         messenger.showSnackBar(const SnackBar(content: Text('تم حفظ الفاتورة وترحيلها وتحديث المخزون')));
@@ -521,8 +578,8 @@ class _AccountingPageState extends State<AccountingPage> {
         if (mounted) messenger.showSnackBar(SnackBar(content: Text('لم تحفظ الفاتورة: $e')));
       }
     }
-    quantity.dispose();
-    price.dispose();
+    for (final controller in quantities) { controller.dispose(); }
+    for (final controller in prices) { controller.dispose(); }
     discount.dispose();
   }
 
