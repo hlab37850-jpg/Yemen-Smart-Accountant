@@ -27,7 +27,10 @@ class AppDatabase {
         }
         if (oldVersion < 3) await _createInvoiceSchema(db);
         if (oldVersion < 4) await db.execute('ALTER TABLE vouchers ADD COLUMN journal_entry_id INTEGER REFERENCES journal_entries(id)');
-        if (oldVersion < 5) await _createReturnsSchema(db);
+        if (oldVersion < 5) {
+          await _createReturnsSchema(db);
+          await _seedAccounts(db);
+        }
       },
     );
     return _db!;
