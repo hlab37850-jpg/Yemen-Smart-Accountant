@@ -192,4 +192,43 @@ void main() {
     expect(current, 13000);
   });
 
+
+  test('account ledger returns the posted debit and credit lines', () async {
+    final marker = 'LEDGER-${DateTime.now().microsecondsSinceEpoch}';
+    const amount = 432100;
+    await AppDatabase.instance.createJournalEntry(
+      description: marker,
+      reference: 'LEDGER-REF',
+      entryDate: '2026-10-15',
+      lines: [
+        {'account_code': '1000', 'debit': amount, 'credit': 0},
+        {'account_code': '4000', 'debit': 0, 'credit': amount},
+      ],
+    );
+    final cashLedger = await AppDatabase.instance.accountLedger('1000');
+    final row = cashLedger.firstWhere((r) => r['description'] == marker);
+    expect(row['debit'], amount);
+    expect(row['credit'], 0);
+    expect(row['reference'], 'LEDGER-REF');
+  });
+
+  test('financial summary calculates revenue, assets and net profit from posted entries', () async {
+    final marker = 'SUMMARY-${DateTime.now().microsecondsSinceEpoch}';
+    const amount = 876500;
+    final before = await AppDatabase.instance.financialSummary();
+    await AppDatabase.instance.createJournalEntry(
+      description: marker,
+      entryDate: '2026-10-15',
+      lines: [
+        {'account_code': '1000', 'debit': amount, 'credit': 0},
+        {'account_code': '4000', 'debit': 0, 'credit': amount},
+      ],
+    );
+    final after = await AppDatabase.instance.financialSummary();
+    expect(after['assets']! - before['assets']!, amount);
+    expect(after['revenue']! - before['revenue']!, amount);
+    expect(after['net_profit']! - before['net_profit']!, amount);
+    expect(after['liabilities_and_equity']! - before['liabilities_and_equity']!, amount);
+  });
+
 }
