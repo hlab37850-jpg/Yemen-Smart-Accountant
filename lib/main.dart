@@ -448,6 +448,7 @@ class _AccountingPageState extends State<AccountingPage> {
             ),
             const SizedBox(height: 8),
             DropdownButtonFormField<int>(
+              key: ValueKey('invoice-contact-$invoiceType'),
               initialValue: contactId,
               decoration: InputDecoration(labelText: invoiceType == 'sale' ? 'العميل' : 'المورد'),
               items: availableContacts.map((c) => DropdownMenuItem<int>(value: c['id'] as int, child: Text(c['name'] as String))).toList(),
@@ -563,6 +564,7 @@ class _AccountingPageState extends State<AccountingPage> {
             ),
             const SizedBox(height: 8),
             DropdownButtonFormField<int>(
+              key: ValueKey('voucher-contact-$type'),
               initialValue: contactId,
               decoration: InputDecoration(labelText: type == 'receipt' ? 'العميل' : 'المورد'),
               items: available.map((c) => DropdownMenuItem<int>(value: c['id'] as int, child: Text(c['name'] as String))).toList(),
