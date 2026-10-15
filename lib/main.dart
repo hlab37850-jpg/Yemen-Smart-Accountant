@@ -298,7 +298,7 @@ class _ProductsPageState extends State<ProductsPage> {
       ),
     );
     if (saved == true && mounted) {
-      int minor(TextEditingController c) => (((double.tryParse(c.text.replaceAll(',', '').trim()) ?? 0) * 100).round()).clamp(0, 1 << 62);
+      int minor(TextEditingController c) => (((double.tryParse(c.text.replaceAll(',', '').trim()) ?? 0) * 100).round()).clamp(0, 1 << 62).toInt();
       final qty = double.tryParse(quantity.text.trim()) ?? 0;
       await AppDatabase.instance.saveProduct(
         id: item?['id'] as int?, name: name.text, sku: sku.text, unit: unit.text,
