@@ -231,4 +231,64 @@ void main() {
     expect(after['liabilities_and_equity']! - before['liabilities_and_equity']!, amount);
   });
 
+
+  test('multi-line invoice aggregates repeated product quantities correctly', () async {
+    final marker = 'MULTI-${DateTime.now().microsecondsSinceEpoch}';
+    await AppDatabase.instance.saveContact(name: marker, phone: '', address: '', kind: 'customer', openingBalance: 0);
+    final contact = (await AppDatabase.instance.contacts('customer')).firstWhere((c) => c['name'] == marker);
+    await AppDatabase.instance.saveProduct(name: marker, sku: marker, unit: 'قطعة', purchasePrice: 1000, salePrice: 2500, quantity: 5);
+    final product = (await AppDatabase.instance.products()).firstWhere((p) => p['sku'] == marker);
+    final id = product['id'] as int;
+    final invoiceId = await AppDatabase.instance.createInvoice(
+      invoiceType: 'sale', invoiceDate: '2026-10-15', contactId: contact['id'] as int,
+      lines: [
+        {'product_id': id, 'quantity': 2, 'unit_price': 2500},
+        {'product_id': id, 'quantity': 1.5, 'unit_price': 2500},
+      ],
+    );
+    final refreshed = (await AppDatabase.instance.products()).firstWhere((p) => p['id'] == id);
+    expect((refreshed['quantity'] as num).toDouble(), 1.5);
+    expect(await AppDatabase.instance.invoiceLines(invoiceId), hasLength(2));
+  });
+
+  test('sales return restores stock and cannot exceed unreturned invoice quantity', () async {
+    final marker = 'RETURN-${DateTime.now().microsecondsSinceEpoch}';
+    await AppDatabase.instance.saveContact(name: marker, phone: '', address: '', kind: 'customer', openingBalance: 0);
+    final contact = (await AppDatabase.instance.contacts('customer')).firstWhere((c) => c['name'] == marker);
+    await AppDatabase.instance.saveProduct(name: marker, sku: marker, unit: 'قطعة', purchasePrice: 1000, salePrice: 3000, quantity: 5);
+    final product = (await AppDatabase.instance.products()).firstWhere((p) => p['sku'] == marker);
+    final productId = product['id'] as int;
+    final invoiceId = await AppDatabase.instance.createInvoice(
+      invoiceType: 'sale', invoiceDate: '2026-10-15', contactId: contact['id'] as int,
+      lines: [{'product_id': productId, 'quantity': 3, 'unit_price': 3000}],
+    );
+    final line = (await AppDatabase.instance.invoiceLines(invoiceId)).single;
+    await AppDatabase.instance.createReturn(
+      invoiceId: invoiceId, invoiceLineId: line['id'] as int, quantity: 1,
+      returnDate: '2026-10-15', note: 'test',
+    );
+    final refreshed = (await AppDatabase.instance.products()).firstWhere((p) => p['id'] == productId);
+    expect((refreshed['quantity'] as num).toDouble(), 3);
+    await expectLater(
+      AppDatabase.instance.createReturn(
+        invoiceId: invoiceId, invoiceLineId: line['id'] as int, quantity: 2.1,
+        returnDate: '2026-10-15',
+      ),
+      throwsArgumentError,
+    );
+    expect(await AppDatabase.instance.returns(), isNotEmpty);
+  });
+
+  test('backup export and restore preserve local records', () async {
+    final marker = 'BACKUP-${DateTime.now().microsecondsSinceEpoch}';
+    await AppDatabase.instance.saveContact(name: marker, phone: '777', address: 'test', kind: 'customer', openingBalance: 500);
+    final backup = await AppDatabase.instance.exportBackupJson();
+    await AppDatabase.instance.deleteContact(
+      (await AppDatabase.instance.contacts('customer')).firstWhere((c) => c['name'] == marker)['id'] as int,
+    );
+    expect((await AppDatabase.instance.contacts('customer')).any((c) => c['name'] == marker), isFalse);
+    await AppDatabase.instance.importBackupJson(backup);
+    expect((await AppDatabase.instance.contacts('customer')).any((c) => c['name'] == marker), isTrue);
+  });
+
 }
